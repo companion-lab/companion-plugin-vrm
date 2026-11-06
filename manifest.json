@@ -1,0 +1,10 @@
+{
+  "id": "vrm",
+  "name": "VRM Avatar",
+  "version": "0.1.0",
+  "description": "VRM avatar models (with the built-in demo asset), motion and emotion clips, and graphics settings.",
+  "abi": 2,
+  "permissions": ["storage", "events"],
+  "frontend": { "entry": "frontend.js" },
+  "backend": { "library": "libvrm_backend.dylib" }
+}
