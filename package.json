@@ -7,7 +7,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@companion-lab/plugin": "file:./sdk/js/@companion/plugin",
+    "@companion-lab/plugin": "^0.1.0",
     "@pixiv/three-vrm": "^3.5.5",
     "@pixiv/three-vrm-animation": "3.5.5",
     "@pixiv/three-vrm-core": "^3.5.5",

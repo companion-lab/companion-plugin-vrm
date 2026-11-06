@@ -17,13 +17,18 @@ host API documentation.
 | `backend/` | Rust cdylib backend (asset serving + graphics settings) |
 | `assets/model/` | Built-in demo VRM asset (committed) |
 | `scripts/` | Asset inspection tools (`inspect-bones.mjs`, `vrma-bake-check.mjs`) |
-| `sdk/js/@companion/plugin` | Vendored frontend SDK (`@companion/plugin`) |
-| `sdk/rust/companion-plugin-sdk` | Vendored backend SDK crate (ABI, host bridge) |
 
 React is never bundled into the plugin: `react` / `react-dom` are aliased to
 the host's copies at build time, so plugin frontends always match the app.
 
 ## Building
+
+Install dependencies first (pulls `@companion-lab/plugin` from npm and `companion-plugin-sdk` from crates.io):
+
+```bash
+npm install
+```
+
 
 The `companion-plugin` CLI from the companion-tauri repo bundles the frontend
 (and builds the Rust backend when present) into a zip importable via the app's
@@ -31,7 +36,7 @@ The `companion-plugin` CLI from the companion-tauri repo bundles the frontend
 
 ```bash
 node /path/to/companion-tauri/plugin-cli/bin/companion-plugin.mjs build /path/to/companion-plugin-vrm \
-  --backend --sdk /path/to/companion-plugin-vrm/sdk/js/@companion/plugin
+  --backend
 ```
 
 Install dependencies first if you use a package manager lockfile

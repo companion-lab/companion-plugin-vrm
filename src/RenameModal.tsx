@@ -7,7 +7,7 @@ import { useEffect, type ChangeEvent } from "react";
 // Portal via the local host-compat shim: the host shares only
 // react-dom/client, whose React 19 entry no longer carries createPortal.
 import { createPortal } from "./vendor/react-dom-compat.js";
-import type { PluginContext } from "../../sdk/js/@companion/plugin";
+import type { PluginContext } from "@companion-lab/plugin";
 
 type Props = {
   ui: PluginContext["ui"];

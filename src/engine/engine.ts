@@ -8,7 +8,7 @@
 // the settings window the bus stays at no-ops, same as before.
 
 import { VRMUtils } from "@pixiv/three-vrm";
-import type { PluginContext } from "../../sdk/js/@companion/plugin";
+import type { PluginContext } from "@companion-lab/plugin";
 import { createScene, frameLoop, type SceneHandle } from "./scene";
 import { loadVRM, type VRMHandle } from "./loader";
 import { ExpressionController } from "./expression/controller";

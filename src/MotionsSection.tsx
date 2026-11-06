@@ -5,7 +5,7 @@
 // idle-mixer config (see useIdleMixer.ts).
 
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
-import type { PluginContext } from "../../sdk/js/@companion/plugin";
+import type { PluginContext } from "@companion-lab/plugin";
 import {
   makeLibraryApi,
   useVrmaImport,

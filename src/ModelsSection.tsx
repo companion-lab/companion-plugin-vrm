@@ -5,7 +5,7 @@
 // error-banner) are global in the settings window.
 
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
-import type { PluginContext } from "../../sdk/js/@companion/plugin";
+import type { PluginContext } from "@companion-lab/plugin";
 import { arrayBufferToBase64, makeLibraryApi, type ModelMeta } from "./backend";
 import { callWithRetry } from "./retry";
 

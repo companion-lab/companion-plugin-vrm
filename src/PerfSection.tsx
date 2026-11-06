@@ -5,8 +5,8 @@
 // useSettingsState bridge. The old "release model memory" card was dropped:
 // the voice plugin owns the TTS/STT engines and their memory now.
 
-import type { PluginContext } from "../../sdk/js/@companion/plugin";
-import { useSettingsState } from "../../sdk/js/@companion/plugin";
+import type { PluginContext } from "@companion-lab/plugin";
+import { useSettingsState } from "@companion-lab/plugin";
 
 type PerfConfig = {
   load_mode: "eager" | "lazy";

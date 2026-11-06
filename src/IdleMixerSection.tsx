@@ -4,7 +4,7 @@
 // the same id the host's builtin.tsx used, so the override contract holds.
 
 import type { ChangeEvent } from "react";
-import type { PluginContext } from "../../sdk/js/@companion/plugin";
+import type { PluginContext } from "@companion-lab/plugin";
 import { useIdleMixer } from "./useIdleMixer";
 
 export function IdleMixerSection({ ctx }: { ctx: PluginContext }) {
