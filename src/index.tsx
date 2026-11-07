@@ -9,7 +9,7 @@
 // second responder would race the real one with an error reply.
 
 import { useEffect, useRef, useState } from "react";
-import { definePlugin, type PluginContext } from "@companion-lab/plugin";
+import { definePlugin, type PluginContext } from "../../../sdk/js/@companion/plugin";
 import {
   MOTION_BAKE_VERSION,
   makeLibraryApi,
@@ -335,7 +335,6 @@ export default definePlugin((ctx: PluginContext) => {
             name: result.name,
             duration: result.duration,
             pose: result.pose,
-            hipsPos: result.hipsPos,
             version: result.version,
             description,
           });
@@ -350,7 +349,6 @@ export default definePlugin((ctx: PluginContext) => {
             name: result.name,
             duration: result.duration,
             pose: result.pose,
-            hipsPos: result.hipsPos,
             expressions: result.expressions,
           });
           // Pick the new clip up in the live registries (and drop any stale

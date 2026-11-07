@@ -10,7 +10,7 @@ name = "vrm_backend"
 crate-type = ["cdylib"]
 
 [dependencies]
-companion-plugin-sdk = "0.1.0"
+companion-plugin-sdk = "0.1"
 # Mirrors the dependency spec the host app uses in app/src-tauri/Cargo.toml;
 # used for model/thumbnail payload encoding exactly as in plugins.rs.
 base64 = "0.22"

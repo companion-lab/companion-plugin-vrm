@@ -4,7 +4,7 @@
 // the plugin runtime in index.tsx.
 
 import { useCallback } from "react";
-import type { PluginContext } from "@companion-lab/plugin";
+import type { PluginContext } from "../../../sdk/js/@companion/plugin";
 // Bake format lives with the engine that creates the bakes (idle/registry.ts);
 // entries carrying any other version are stale bakes and get deleted on load
 // (see fetchFreshLibrary in index.tsx).

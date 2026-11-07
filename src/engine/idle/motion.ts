@@ -5,6 +5,7 @@ import {
   resolveMotionName,
   isCustomMotion,
   type Keyframe,
+  type MotionTracks,
 } from "./registry";
 
 export type { Keyframe } from "./registry";
@@ -206,13 +207,19 @@ export class MotionController {
 
     const sampleT = Math.min(this.t, this.duration);
     const out: MotionState = {};
-    for (const [bone, frames] of Object.entries(entry.pose)) {
-      const v = sampleHold(frames, sampleT);
-      if (v) out[bone] = v;
+    let hipsPos: MotionDelta | undefined;
+    if (entry.tracks) {
+      // v4 bake: shared time grid + per-bone quat blobs, linear slerp.
+      hipsPos = sampleTracks(entry.tracks, sampleT, out);
+    } else {
+      for (const [bone, frames] of Object.entries(entry.pose ?? {})) {
+        const v = sampleHold(frames, sampleT);
+        if (v) out[bone] = v;
+      }
+      hipsPos = entry.hipsPos
+        ? (sampleHold(entry.hipsPos, sampleT) ?? undefined)
+        : undefined;
     }
-    const hipsPos = entry.hipsPos
-      ? (sampleHold(entry.hipsPos, sampleT) ?? undefined)
-      : undefined;
     return {
       state: out,
       absolute: this.isAbsolute(),
@@ -227,4 +234,66 @@ function sampleHold(frames: Keyframe[], t: number) {
   if (!frames.length) return null;
   if (t >= frames[frames.length - 1].t) return frames[frames.length - 1].v;
   return sample(frames, t);
+}
+
+// ─── v4 baked tracks (base64 Float32 blobs, decoded in registry.ts) ───
+
+const _bA = new THREE.Quaternion();
+const _bB = new THREE.Quaternion();
+const _bOut = new THREE.Quaternion();
+
+// Greatest i with times[i] <= t. The grid is uniform, but binary-search
+// anyway — log2(n) per bone per frame and immune to float drift in dt.
+function trackIndex(times: Float32Array, t: number): number {
+  const last = times.length - 1;
+  if (t <= times[0]) return 0;
+  if (t >= times[last]) return last;
+  let lo = 0;
+  let hi = last;
+  while (lo < hi - 1) {
+    const mid = (lo + hi) >> 1;
+    if (times[mid] <= t) lo = mid;
+    else hi = mid;
+  }
+  return lo;
+}
+
+// Samples every bone (and hips, when present) at t into out. Holds the last
+// frame past the end (fade-out), first frame before the start.
+function sampleTracks(
+  tracks: MotionTracks,
+  t: number,
+  out: MotionState,
+): MotionDelta | undefined {
+  const { times } = tracks;
+  const last = times.length - 1;
+  const idx = trackIndex(times, t);
+  const span = idx < last ? times[idx + 1] - times[idx] : 0;
+  const k = span > 0 ? (t - times[idx]) / span : 0;
+
+  for (const [bone, values] of Object.entries(tracks.bones)) {
+    const i4 = idx * 4;
+    if (idx >= last || span <= 0) {
+      out[bone] = { x: values[i4], y: values[i4 + 1], z: values[i4 + 2], w: values[i4 + 3] };
+      continue;
+    }
+    _bA.set(values[i4], values[i4 + 1], values[i4 + 2], values[i4 + 3]);
+    const j4 = i4 + 4;
+    _bB.set(values[j4], values[j4 + 1], values[j4 + 2], values[j4 + 3]);
+    _bOut.slerpQuaternions(_bA, _bB, k);
+    out[bone] = { x: _bOut.x, y: _bOut.y, z: _bOut.z, w: _bOut.w };
+  }
+
+  if (!tracks.hipsPos) return undefined;
+  const values = tracks.hipsPos;
+  const i3 = idx * 3;
+  if (idx >= last || span <= 0) {
+    return { x: values[i3], y: values[i3 + 1], z: values[i3 + 2] };
+  }
+  const j3 = i3 + 3;
+  return {
+    x: lerp(values[i3], values[j3], k),
+    y: lerp(values[i3 + 1], values[j3 + 1], k),
+    z: lerp(values[i3 + 2], values[j3 + 2], k),
+  };
 }
