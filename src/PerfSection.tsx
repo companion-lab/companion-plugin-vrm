@@ -1,7 +1,8 @@
 // Graphics settings — the former core Performance tab, now owned by the vrm
-// plugin. The host SettingsPage still owns perf load/save/persist (the
-// backend owns the config file and the perf-changed broadcast); the section
-// reads/writes that shared state through the SDK's useSettingsState bridge.
+// plugin: its backend persists the config file and broadcasts perf-changed
+// (plugin-namespaced) on set. The section reads/writes the shared settings-
+// page state through the SDK's useSettingsState bridge; the SettingsPage
+// persists via the plugin backend (see app/src/perf.ts).
 // The former "Model Loading" card (load mode, TTS threads, idle unload) moved
 // to the voice plugins whose engines it configures: the tts plugin renders
 // load mode + TTS threads in its Speech Synthesis section, the stt plugin the

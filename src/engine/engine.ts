@@ -33,7 +33,7 @@ import {
 import { loadVrma } from "./idle/vrma-loader";
 import { base64ToArrayBuffer } from "./base64";
 import { IdleMixer, loadIdleMixer } from "./idle/idle-mixer";
-import { tauriInvoke, tauriListen } from "../vendor/tauri-events";
+import { tauriListen } from "../vendor/tauri-events";
 // Shared backend-call retry: plugin-context invokes occasionally never
 // resolve on macOS (see retry.ts) — the boot sequence must converge.
 import { callWithRetry } from "../retry";
@@ -245,12 +245,12 @@ function runEngine(ctx: PluginContext, canvas: HTMLCanvasElement): () => void {
     // consecutive failure surfaces the error overlay.
     for (let bootAttempt = 1; bootAttempt <= 2; bootAttempt++) {
       try {
-        // Perf config is host-owned state; the engine reads it directly.
-        // Retried like every boot read — an invoke response eaten while the
-        // window is busy would otherwise stall the whole boot silently (the
-        // one step that had no retry).
+        // Perf config lives in this plugin's backend; the engine reads it
+        // directly. Retried like every boot read — an invoke response eaten
+        // while the window is busy would otherwise stall the whole boot
+        // silently (the one step that had no retry).
         const perf = await callWithRetry(
-          () => tauriInvoke<PerfConfigShape>("get_performance_config"),
+          () => ctx.backend.call<PerfConfigShape>("vrm.get_performance_config"),
           ctx.log,
           "get_performance_config",
         );
@@ -321,20 +321,19 @@ function runEngine(ctx: PluginContext, canvas: HTMLCanvasElement): () => void {
     }
   })();
 
-  // Host-global broadcasts: perf changes retune the renderer, idle-mixer
-  // changes reload the mixer config. Both are host-owned channels the
-  // plugin-namespaced events can't reach.
-  void tauriListen<PerfConfigShape>("perf-changed", (cfg) => {
+  // Plugin-namespaced broadcast: perf changes retune the renderer. The
+  // backend emits "perf-changed" on set; ctx.events scopes it to this
+  // plugin's host channel (plugin:vrm:perf-changed).
+  const offPerf = ctx.events.on("perf-changed", (raw) => {
+    const cfg = raw as PerfConfigShape;
     sceneRef.current?.setPerf({
       maxPixelRatio: cfg.max_pixel_ratio,
       fpsCap: fpsFrom(cfg.fps_cap),
     });
-  })
-    .then((off) => {
-      if (cancelled) off();
-      else cleanups.push(off);
-    })
-    .catch(() => {});
+  });
+  if (cancelled) offPerf();
+  else cleanups.push(offPerf);
+  // Host-global broadcast: idle-mixer changes reload the mixer config.
   void tauriListen("idle-mixer-changed", () => {
     idleMixerRef.current?.setConfig(loadIdleMixer());
   })

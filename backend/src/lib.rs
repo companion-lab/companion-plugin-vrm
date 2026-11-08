@@ -18,9 +18,10 @@
 //!   `vrm.*` method (legacy `library.*` and bare former command names route
 //!   to the same handlers) with identical snake_case payload fields and
 //!   result shapes.
-//! - Events: the source module contained no `app.emit(...)` calls, so none
-//!   are reproduced here (verified: no emits, and no other host module emits
-//!   model-related events on its behalf).
+//! - Events: `set_performance_config` broadcasts `perf-changed` (host-
+//!   namespaced as `plugin:vrm:perf-changed`), ported from the former host
+//!   perf module it replaces. The source module this was ported from had no
+//!   emits of its own.
 
 use companion_plugin_sdk::{export_plugin, Plugin, PluginCtx};
 use serde::{Deserialize, Serialize};
@@ -245,6 +246,49 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
+}
+
+// ─── Performance config (ported from the host's src-tauri/src/perf.rs) ───
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LoadMode {
+    Eager,
+    Lazy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FpsCap {
+    Thirty,
+    Sixty,
+    Uncapped,
+}
+
+/// The shared performance preferences (graphics fields render here, the
+/// voice fields configure the tts/stt plugins — all edited through the
+/// settings page's shared perf state).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct PerformanceConfig {
+    pub load_mode: LoadMode,
+    pub tts_threads: usize,
+    pub unload_stt_when_idle: bool,
+    pub max_pixel_ratio: f32,
+    pub fps_cap: FpsCap,
+    pub antialias: bool,
+}
+
+impl Default for PerformanceConfig {
+    fn default() -> Self {
+        PerformanceConfig {
+            load_mode: LoadMode::Eager,
+            tts_threads: 0,
+            unload_stt_when_idle: true,
+            max_pixel_ratio: 1.5,
+            fps_cap: FpsCap::Sixty,
+            antialias: true,
+        }
+    }
 }
 
 /// The library: same directory layout and file formats as the former host
@@ -705,6 +749,31 @@ impl Library {
         Ok(())
     }
 
+    // ─── Performance config ops (former host tauri commands) ───
+
+    fn performance_config_file(&self) -> Result<PathBuf, String> {
+        Ok(self.data_root()?.join("performance.json"))
+    }
+
+    /// Full perf config; defaults when the file is missing or unreadable
+    /// (same fallback semantics as the former host `read_config`).
+    fn op_get_performance_config(&self) -> Result<PerformanceConfig, String> {
+        let path = self.performance_config_file()?;
+        match fs::read_to_string(&path) {
+            Ok(data) => Ok(serde_json::from_str(&data).unwrap_or_default()),
+            Err(_) => Ok(PerformanceConfig::default()),
+        }
+    }
+
+    /// Persist the config and hand it back — the returned value doubles as
+    /// the `perf-changed` broadcast payload (see `Plugin::handle`).
+    fn op_set_performance_config(&self, config: PerformanceConfig) -> Result<PerformanceConfig, String> {
+        let path = self.performance_config_file()?;
+        let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+        fs::write(&path, json).map_err(|e| format!("write config: {e}"))?;
+        Ok(config)
+    }
+
     // ─── Request routing ───
 
     /// Route one request. Methods are the namespaced `vrm.*` names; the
@@ -792,6 +861,18 @@ impl Library {
             "vrm.set_active_model" | "library.set_active_model" | "set_active_model" => {
                 self.op_set_active_model(arg("id")?)?;
                 Ok(Value::Null)
+            }
+
+            // ── Performance config ──
+            "vrm.get_performance_config" | "library.get_performance_config" | "get_performance_config" => {
+                json_ok(self.op_get_performance_config()?)
+            }
+            "vrm.set_performance_config" | "library.set_performance_config" | "set_performance_config" => {
+                let config: PerformanceConfig = serde_json::from_value(
+                    payload.get("config").cloned().unwrap_or(Value::Null),
+                )
+                .map_err(|e| format!("bad config: {e}"))?;
+                json_ok(self.op_set_performance_config(config)?)
             }
 
             other => Err(format!("unknown method: {other}")),
@@ -884,11 +965,13 @@ pub fn extract_glb_thumbnail(bytes: &[u8]) -> Option<Vec<u8>> {
 
 /// Concrete plugin type handed to `export_plugin!`.
 ///
-/// No events are emitted (the source module had none), so the
-/// `PluginCtx` is only used during `init`; a data dir plus the package dir
-/// (for the built-in demo assets) are the only state.
+/// The ctx is kept so `set_performance_config` can broadcast `perf-changed`
+/// (host-namespaced as `plugin:vrm:perf-changed`), replacing the former
+/// host's `app.emit("perf-changed", ...)` in perf.rs. A data dir plus the
+/// package dir (for the built-in demo assets) are the only other state.
 pub struct VrmPlugin {
     inner: Option<Library>,
+    ctx: Option<PluginCtx>,
 }
 
 impl Default for VrmPlugin {
@@ -899,7 +982,10 @@ impl Default for VrmPlugin {
 
 impl VrmPlugin {
     pub fn new() -> Self {
-        VrmPlugin { inner: None }
+        VrmPlugin {
+            inner: None,
+            ctx: None,
+        }
     }
 }
 
@@ -913,6 +999,7 @@ impl Plugin for VrmPlugin {
         }
         ctx.info("vrm ready");
         self.inner = Some(Library { data_dir, plugin_dir });
+        self.ctx = Some(ctx);
         Ok(())
     }
 
@@ -926,6 +1013,21 @@ impl Plugin for VrmPlugin {
         // webview consoles are not visible in production.
         let start = std::time::Instant::now();
         let result = library.route(method, payload);
+        // The perf-changed broadcast rides on the set op's return value (the
+        // saved config), mirroring the former host command's emit. Aliases
+        // must match the route() arms exactly.
+        if result.is_ok()
+            && matches!(
+                method,
+                "vrm.set_performance_config"
+                    | "library.set_performance_config"
+                    | "set_performance_config"
+            )
+        {
+            if let (Some(ctx), Ok(config)) = (&self.ctx, &result) {
+                ctx.emit("perf-changed", config);
+            }
+        }
         println!(
             "[vrm-backend] {method} in {:?} ok={}",
             start.elapsed(),
@@ -944,8 +1046,14 @@ mod tests {
     use serde_json::json;
 
     fn temp_root(tag: &str) -> PathBuf {
+        // Sequence counter + timestamp: two parallel tests can start within
+        // the same nanosecond, and a shared dir cross-contaminates scans
+        // (a leftover Huge.json once made a list assertion see 2 != 1).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "library-plugin-test-{tag}-{}",
+            "library-plugin-test-{tag}-{}-{}",
+            SEQ.fetch_add(1, Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
@@ -1540,5 +1648,88 @@ mod tests {
             lib.route("vrm.get_active_model", json!({})).unwrap(),
             json!("builtin:demo")
         );
+    }
+
+    // ── Performance config (ported from the host's perf.rs) ──
+
+    #[test]
+    fn perf_config_defaults_then_set_get_roundtrip() {
+        let lib = library();
+        // Missing file: full defaults (host read_config semantics).
+        let default_cfg = lib.route("vrm.get_performance_config", json!({})).unwrap();
+        assert_eq!(default_cfg["load_mode"], "eager");
+        assert_eq!(default_cfg["tts_threads"], 0);
+        assert_eq!(default_cfg["unload_stt_when_idle"], true);
+        assert_eq!(default_cfg["max_pixel_ratio"], 1.5);
+        assert_eq!(default_cfg["fps_cap"], "sixty");
+        assert_eq!(default_cfg["antialias"], true);
+
+        // Set persists and hands the config back (the perf-changed payload).
+        let cfg = json!({
+            "load_mode": "lazy",
+            "tts_threads": 4,
+            "unload_stt_when_idle": false,
+            "max_pixel_ratio": 2.0,
+            "fps_cap": "thirty",
+            "antialias": false
+        });
+        let saved = lib
+            .route("vrm.set_performance_config", json!({ "config": cfg }))
+            .unwrap();
+        assert_eq!(saved["fps_cap"], "thirty");
+        assert!(lib
+            .performance_config_file()
+            .unwrap()
+            .exists());
+
+        // Read back through the namespaced and bare legacy aliases.
+        let got = lib.route("vrm.get_performance_config", json!({})).unwrap();
+        assert_eq!(got["load_mode"], "lazy");
+        assert_eq!(got["tts_threads"], 4);
+        assert_eq!(got["antialias"], false);
+        assert_eq!(
+            lib.route("get_performance_config", json!({})).unwrap(),
+            got
+        );
+    }
+
+    #[test]
+    fn perf_config_corrupt_file_falls_back_to_defaults() {
+        let lib = library();
+        fs::write(
+            lib.performance_config_file().unwrap(),
+            "{ not valid json",
+        )
+        .unwrap();
+        let cfg = lib.route("vrm.get_performance_config", json!({})).unwrap();
+        assert_eq!(cfg["max_pixel_ratio"], 1.5);
+        assert_eq!(cfg["fps_cap"], "sixty");
+    }
+
+    #[test]
+    fn perf_config_rejects_invalid_payloads() {
+        let lib = library();
+        // Unknown enum value…
+        let err = lib
+            .route(
+                "vrm.set_performance_config",
+                json!({ "config": json!({
+                    "load_mode": "sometimes",
+                    "tts_threads": 0,
+                    "unload_stt_when_idle": true,
+                    "max_pixel_ratio": 1.5,
+                    "fps_cap": "sixty",
+                    "antialias": true
+                }) }),
+            )
+            .unwrap_err();
+        assert!(err.contains("bad config"), "unexpected error: {err}");
+        // …and a missing field.
+        assert!(lib
+            .route(
+                "vrm.set_performance_config",
+                json!({ "config": json!({ "load_mode": "eager" }) })
+            )
+            .is_err());
     }
 }
