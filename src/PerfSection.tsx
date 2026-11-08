@@ -8,8 +8,8 @@
 // load mode + TTS threads in its Speech Synthesis section, the stt plugin the
 // idle unload in its Speech Recognition section.
 
-import type { PluginContext } from "../../../sdk/js/@companion/plugin";
-import { useSettingsState } from "../../../sdk/js/@companion/plugin";
+import type { PluginContext } from "@companion-lab/plugin";
+import { useSettingsState } from "@companion-lab/plugin";
 
 type PerfConfig = {
   max_pixel_ratio: number;

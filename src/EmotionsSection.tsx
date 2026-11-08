@@ -4,7 +4,7 @@
 // inlined from app/src/expression/registry.ts.
 
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
-import type { PluginContext } from "../../../sdk/js/@companion/plugin";
+import type { PluginContext } from "@companion-lab/plugin";
 import {
   makeLibraryApi,
   useVrmaImport,
