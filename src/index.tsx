@@ -21,6 +21,7 @@ import { currentWindowLabel } from "./vendor/tauri-events";
 import { ModelsSection } from "./ModelsSection";
 import { MotionsSection } from "./MotionsSection";
 import { EmotionsSection } from "./EmotionsSection";
+import { DisplaySection } from "./DisplaySection";
 import { GraphicsSection } from "./PerfSection";
 import { IdleMixerSection } from "./IdleMixerSection";
 import {
@@ -191,7 +192,7 @@ export default definePlugin((ctx: PluginContext) => {
     label: "Model",
     group: "Avatar",
     order: 20,
-    desc: "Active VRM avatar and uploaded models.",
+    desc: "Active VRM avatar, uploaded models, and display.",
     icon: ({ className }: { className?: string }) => (
       <svg className={className} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5z" /><path d="M2 12l10 5 10-5" /><path d="M2 17l10 5 10-5" /></svg>
     ),
@@ -231,6 +232,15 @@ export default definePlugin((ctx: PluginContext) => {
     order: 100,
     component: function LibraryModelsSection() {
       return <ModelsSection ctx={ctx} />;
+    },
+  });
+  ctx.settings.registerSection({
+    id: "model.display",
+    tabId: "model",
+    slot: "top",
+    order: 100,
+    component: function LibraryDisplaySection() {
+      return <DisplaySection ctx={ctx} />;
     },
   });
   ctx.settings.registerSection({

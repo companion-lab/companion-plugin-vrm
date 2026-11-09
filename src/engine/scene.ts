@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import type { DisplaySettings } from "./display";
 
 export type RendererPerf = {
   maxPixelRatio: number;
@@ -14,9 +15,13 @@ export const DEFAULT_RENDERER_PERF: RendererPerf = {
 
 export type SceneHandle = {
   scene: THREE.Scene;
+  /** Display-transform wrapper the avatar scene graph hangs off (scale +
+   *  px offsets; see setDisplay). */
+  stage: THREE.Group;
   camera: THREE.PerspectiveCamera;
   renderer: THREE.WebGLRenderer;
   beginFrame: () => { dt: number; t: number; render: boolean };
+  setDisplay: (d: DisplaySettings) => void;
   setPerf: (p: Partial<Pick<RendererPerf, "maxPixelRatio" | "fpsCap">>) => void;
   dispose: () => void;
 };
@@ -55,6 +60,33 @@ export function createScene(canvas: HTMLCanvasElement, perf: RendererPerf = DEFA
   dir.position.set(1, 2, -2);
   scene.add(dir);
 
+  // The avatar scene graph hangs off this group so display transforms
+  // (settings scale/offsets) never touch model-local placement — the idle
+  // ground reference, motion hips positions, and the y=0.6 lift all stay in
+  // the model's own space.
+  const stage = new THREE.Group();
+  scene.add(stage);
+
+  let display: DisplaySettings = { scale: 1, x: 0, y: 0, tracking: true };
+
+  // Map the display settings onto the stage. The camera looks straight down
+  // -z at the model plane, so CSS px convert to world units at that plane's
+  // distance; scale pivots at the camera's focus height so zooming keeps the
+  // model framed instead of growing it away from view.
+  const applyDisplay = () => {
+    const h = canvas.clientHeight;
+    if (h === 0) return;
+    const worldPerPx =
+      (2 * camera.position.z * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2)) / h;
+    const s = display.scale;
+    stage.scale.setScalar(s);
+    stage.position.set(
+      display.x * worldPerPx,
+      camera.position.y * (1 - s) + display.y * worldPerPx,
+      0,
+    );
+  };
+
   const fit = () => {
     const w = canvas.clientWidth;
     const h = canvas.clientHeight;
@@ -62,6 +94,7 @@ export function createScene(canvas: HTMLCanvasElement, perf: RendererPerf = DEFA
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
+    applyDisplay();
   };
   fit();
   const ro = new ResizeObserver(() => {
@@ -88,9 +121,14 @@ export function createScene(canvas: HTMLCanvasElement, perf: RendererPerf = DEFA
 
   return {
     scene,
+    stage,
     camera,
     renderer,
     beginFrame,
+    setDisplay: (d) => {
+      display = d;
+      applyDisplay();
+    },
     setPerf: (p) => {
       if (p.maxPixelRatio !== undefined) {
         maxPixelRatio = p.maxPixelRatio;

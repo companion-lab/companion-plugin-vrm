@@ -3,6 +3,7 @@ import { VRM, VRMHumanBoneName } from "@pixiv/three-vrm";
 import { VRMHandle } from "../loader";
 import type { MotionDelta, MotionState } from "./motion";
 import type { ExpressionController } from "../expression/controller";
+import { updateCursorLook } from "../cursor-look";
 
 const _euler = new THREE.Euler();
 const _delta = new THREE.Quaternion();
@@ -282,8 +283,12 @@ function updateBody(vrm: VRM, dt: number): void {
 
   const breath = Math.sin(breathPhase * 1.2) * 0.01;
   const sway = Math.sin(breathPhase * 0.55) * 0.012;
-  const lookYaw = Math.sin(breathPhase * 0.3) * 0.12;
-  const lookPitch = Math.sin(breathPhase * 0.22) * 0.05;
+  // Cursor tracking rides on the idle sway (targets smoothed in cursor-look;
+  // zero while tracking is off or the cursor is outside the window). Applied
+  // through the same neck/head/eye deltas, so motion overrides keep winning.
+  const cursor = updateCursorLook(dt);
+  const lookYaw = Math.sin(breathPhase * 0.3) * 0.12 + cursor.yaw;
+  const lookPitch = Math.sin(breathPhase * 0.22) * 0.05 + cursor.pitch;
   const armBob = Math.sin(breathPhase * 0.9) * 0.04;
   const weightShift = Math.sin(breathPhase * 0.5);
   const breathY = Math.sin(breathPhase * 1.2) * 0.01;

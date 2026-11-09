@@ -33,6 +33,8 @@ import {
 import { loadVrma } from "./idle/vrma-loader";
 import { base64ToArrayBuffer } from "./base64";
 import { IdleMixer, loadIdleMixer } from "./idle/idle-mixer";
+import { coerceDisplay, DEFAULT_DISPLAY, type DisplaySettings } from "./display";
+import { pollCursorLook, setCursorLookEnabled } from "./cursor-look";
 import { tauriListen } from "../vendor/tauri-events";
 // Shared backend-call retry: plugin-context invokes occasionally never
 // resolve on macOS (see retry.ts) — the boot sequence must converge.
@@ -45,6 +47,8 @@ type PerfConfigShape = {
   fps_cap: FpsCap;
   antialias: boolean;
 };
+
+const DISPLAY_STORAGE_KEY = "display";
 
 const fpsFrom = (cap: FpsCap): number | null =>
   cap === "thirty" ? 30 : cap === "sixty" ? 60 : null;
@@ -115,18 +119,24 @@ function runEngine(ctx: PluginContext, canvas: HTMLCanvasElement): () => void {
   const motionRef = { current: null as MotionController | null };
   const sceneRef = { current: null as ReturnType<typeof createScene> | null };
   const idleMixerRef = { current: null as IdleMixer | null };
+  const displayRef = { current: { ...DEFAULT_DISPLAY } as DisplaySettings };
   let swapGen = 0;
+
+  const applyDisplay = () => {
+    sceneRef.current?.setDisplay(displayRef.current);
+    setCursorLookEnabled(displayRef.current.tracking);
+  };
 
   const attachVrmTo = (scene: ReturnType<typeof createScene>, vrm: VRMHandle) => {
     const prev = handleRef.current;
     if (prev) {
-      scene.scene.remove(prev.scene);
+      scene.stage.remove(prev.scene);
       VRMUtils.deepDispose(prev.scene);
     }
     resetIdleState();
     handleRef.current = vrm;
     vrm.scene.position.y = 0.6;
-    scene.scene.add(vrm.scene);
+    scene.stage.add(vrm.scene);
     if (vrm.vrm?.humanoid) {
       vrm.vrm.humanoid.autoUpdateHumanBones = false;
     }
@@ -264,6 +274,16 @@ function runEngine(ctx: PluginContext, canvas: HTMLCanvasElement): () => void {
         sceneRef.current = scene;
         idleMixerRef.current = new IdleMixer();
 
+        // Persisted display settings, so scale/offset/tracking survive
+        // reloads (same storage key the settings section writes).
+        try {
+          const stored = await ctx.storage.get<unknown>(DISPLAY_STORAGE_KEY);
+          if (stored) displayRef.current = coerceDisplay(stored);
+        } catch {
+          /* defaults are fine */
+        }
+        applyDisplay();
+
         let initialId = "builtin:demo";
         try {
           const stored = await callWithRetry(
@@ -333,6 +353,19 @@ function runEngine(ctx: PluginContext, canvas: HTMLCanvasElement): () => void {
   });
   if (cancelled) offPerf();
   else cleanups.push(offPerf);
+  // Plugin-namespaced broadcast from the settings Display section (see
+  // DisplaySection.tsx): retune the stage transform + cursor tracking.
+  const offDisplay = ctx.events.on("display-changed", (raw) => {
+    displayRef.current = coerceDisplay(raw);
+    applyDisplay();
+  });
+  if (cancelled) offDisplay();
+  else cleanups.push(offDisplay);
+  // Cursor tracking polls the host's window-local cursor; the idle pose
+  // blends the angles in (see cursor-look.ts).
+  const pollId = window.setInterval(pollCursorLook, 120);
+  if (cancelled) window.clearInterval(pollId);
+  else cleanups.push(() => window.clearInterval(pollId));
   // Host-global broadcast: idle-mixer changes reload the mixer config.
   void tauriListen("idle-mixer-changed", () => {
     idleMixerRef.current?.setConfig(loadIdleMixer());
