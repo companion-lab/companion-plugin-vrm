@@ -10,9 +10,9 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "companion-plugin-sdk"
-version = "0.1.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5213fbb339350aeab0fa7c703c44e5879ffd688c8f502ce543e857482344f453"
+checksum = "5db81ff806956f5dc8ad28f797fe3df2ec09cde8c65479e011d29aca441f3a81"
 dependencies = [
  "serde",
  "serde_json",
@@ -110,7 +110,7 @@ checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 
 [[package]]
 name = "vrm-backend"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "companion-plugin-sdk",
