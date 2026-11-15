@@ -2,6 +2,7 @@
 name = "vrm-backend"
 version = "0.3.1"
 description = "VRM avatar feature plugin backend for companion-tauri"
+authors = ["Companion Lab"]
 license = "MIT"
 edition = "2021"
 
