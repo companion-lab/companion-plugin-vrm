@@ -1,7 +1,7 @@
 {
   "id": "vrm",
   "name": "VRM Avatar",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "VRM avatar models (with the built-in demo asset), motion and emotion clips, and graphics settings.",
   "abi": 2,
   "permissions": [
