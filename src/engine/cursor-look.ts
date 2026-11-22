@@ -49,16 +49,17 @@ export function setCursorLookEnabled(enabled: boolean): void {
 /** Normalized -1..1 → look angles, clamped so the gaze saturates at the
  *  window-edge deflection once the cursor is outside the window (the coords
  *  themselves may be unclamped — cursor_global extrapolates across
- *  displays). Window y grows downward, but the rig's local X euler (YXZ,
- *  applied to neck/head/eyes in idle/animation.ts) tilts the face DOWN for
- *  positive angles — so pitch negates ny to look toward the cursor. +yaw
- *  (Y euler) turns the face toward screen right. Shared by the probe path
- *  and the DOM fallback. */
+ *  displays). The look angles are normalized-frame eulers (YXZ, applied to
+ *  neck/head/eyes in idle/animation.ts via pose-space.ts): the X euler
+ *  pitches the face DOWN for positive angles (+Z → -Y), and window y grows
+ *  downward (ny > 0 = cursor below center = look down), so pitch follows ny
+ *  directly. +yaw (Y euler) turns the face toward +X = screen right.
+ *  Shared by the probe path and the DOM fallback. */
 function setTargetsFromLocal(x: number, y: number, w: number, h: number): void {
   const nx = Math.max(-1, Math.min(1, (x / w) * 2 - 1));
   const ny = Math.max(-1, Math.min(1, (y / h) * 2 - 1));
   state.targetYaw = nx * MAX_YAW;
-  state.targetPitch = -ny * MAX_PITCH;
+  state.targetPitch = ny * MAX_PITCH;
 }
 
 /** Poll the cursor and refresh the look targets; the engine drives the

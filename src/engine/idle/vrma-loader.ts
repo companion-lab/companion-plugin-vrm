@@ -6,6 +6,7 @@ import {
   MOTION_BAKE_VERSION,
   type BakedPoseV4,
 } from "./registry";
+import { normalizedToRawDelta } from "./pose-space";
 import { arrayBufferToBase64 } from "../base64";
 
 const SAMPLE_RATE = 30;
@@ -15,7 +16,6 @@ const SAMPLE_RATE = 30;
 // is persisted.
 const BAKE_BUDGET = 48 * 1024 * 1024;
 const _qA = new THREE.Quaternion();
-const _qB = new THREE.Quaternion();
 const _qC = new THREE.Quaternion();
 const _qD = new THREE.Quaternion();
 const _vA = new THREE.Vector3();
@@ -74,9 +74,10 @@ export async function loadVrma(
 
   // humanoidTracks.rotation quats (N) are normalized rest-relative deltas,
   // assigned straight onto normalized bones by createVRMAnimationClip.
-  // three-vrm maps them to raw bones as: raw = invP * N * P * B
+  // three-vrm maps them to raw bones as: raw = P⁻¹ · N · P · B
   // (P = parent world rest, B = local rest). Playback drives raw bones as
-  // rest * delta, so bake delta = B^-1 * P^-1 * N * P * B.
+  // rest * delta, so bake delta = B⁻¹ · P⁻¹ · N · P · B — the shared
+  // sandwich in pose-space.ts, which the idle pose converts through too.
   // P excludes scene-level yaw (rotateVRM0): built from ancestor locals.
   // Stored as quats, no euler roundtrip.
   // ponytail: P assumes identity scene transform; recompute from matrixWorld if models gain scene-level rotation.
@@ -123,7 +124,7 @@ export async function loadVrma(
       // VRM 0.x spec: negate x and z (same sign flip createVRMAnimationClip applies)
       if (metaVersion === "0") q.set(-q.x, q.y, -q.z, q.w);
 
-      _qA.copy(b).invert().multiply(_qB.copy(p).invert()).multiply(q).multiply(p).multiply(b);
+      normalizedToRawDelta(q, p, b, _qA);
 
       values[i * 4] = _qA.x;
       values[i * 4 + 1] = _qA.y;

@@ -4,8 +4,10 @@ import { VRMHandle } from "../loader";
 import type { MotionDelta, MotionState } from "./motion";
 import type { ExpressionController } from "../expression/controller";
 import { updateCursorLook } from "../cursor-look";
+import { normalizedToRawDelta } from "./pose-space";
 
 const _euler = new THREE.Euler();
+const _qN = new THREE.Quaternion();
 const _delta = new THREE.Quaternion();
 const _qIdle = new THREE.Quaternion();
 const _qMo = new THREE.Quaternion();
@@ -51,6 +53,9 @@ for (const side of ["left", "right"] as const) {
 }
 
 const restCache = new Map<string, THREE.Quaternion>();
+// Parent world rest rotation per bone (scene-level yaw folded in), for the
+// normalized→raw delta conversion in pose-space.ts.
+const parentCache = new Map<string, THREE.Quaternion>();
 // Raw bone nodes resolved once per model instead of a Map lookup per bone per frame.
 const boneCache = new Map<string, THREE.Object3D | null | undefined>();
 
@@ -99,12 +104,32 @@ function minFootY(): number {
   return min;
 }
 
-function captureRest(humanoid: VRM["humanoid"]): void {
+// Parent world rest rotation with the scene-level yaw folded in. The yaw
+// (rotateVRM0 turns VRM 0.x models 180° around Y) must be part of P so that
+// authored normalized-frame deltas land in the RENDERED frame: raw =
+// (yaw·P)⁻¹·N·(yaw·P)·B produces a world delta of exactly N on screen. For
+// the π yaw this is equivalent to the x/z negation three-vrm applies to VRM
+// 0.x .vrma tracks — the .vrma bake keeps its own pre-yaw P + negation form.
+function parentWorldRest(vrm: VRM, bone: THREE.Object3D): THREE.Quaternion {
+  const chain: THREE.Object3D[] = [];
+  let cur: THREE.Object3D | null = bone.parent;
+  while (cur && cur !== vrm.scene) {
+    chain.unshift(cur);
+    cur = cur.parent;
+  }
+  const p = new THREE.Quaternion();
+  for (const ancestor of chain) p.multiply(ancestor.quaternion);
+  return p.premultiply(vrm.scene.quaternion);
+}
+
+function captureRest(vrm: VRM): void {
+  const humanoid = vrm.humanoid;
   if (!humanoid) return;
   for (const name of BONES) {
     const bone = boneNode(humanoid, name);
     if (bone && !restCache.has(name)) {
       restCache.set(name, bone.quaternion.clone());
+      parentCache.set(name, parentWorldRest(vrm, bone));
     }
   }
   const hips = boneNode(humanoid, "hips");
@@ -117,6 +142,7 @@ function captureRest(humanoid: VRM["humanoid"]): void {
 
 export function resetIdleState(): void {
   restCache.clear();
+  parentCache.clear();
   boneCache.clear();
   firstFrame = true;
   hipsRestCaptured = false;
@@ -147,20 +173,24 @@ export function captureGroundReference(vrm: VRM): void {
   }
 }
 
-function applyDelta(
+// Applies a normalized-frame euler delta (YXZ) to a raw bone: converts it
+// into the model's raw-bone space first (pose-space.ts), then composes it
+// onto the raw rest rotation.
+function applyPose(
   humanoid: VRM["humanoid"],
   name: VRMHumanBoneName,
-  x: number,
-  y: number,
-  z: number,
+  nx: number,
+  ny: number,
+  nz: number,
 ): void {
   if (!humanoid) return;
   const bone = boneNode(humanoid, name);
   if (!bone) return;
   const rest = restCache.get(name);
-  if (!rest) return;
-  _euler.set(x, y, z, "YXZ");
-  _delta.setFromEuler(_euler);
+  const parent = parentCache.get(name);
+  if (!rest || !parent) return;
+  eulerToQuat(nx, ny, nz, _qN);
+  normalizedToRawDelta(_qN, parent, rest, _delta);
   bone.quaternion.copy(rest).multiply(_delta);
 }
 
@@ -189,25 +219,31 @@ function deltaToQuat(d: MotionDelta, out: THREE.Quaternion): THREE.Quaternion {
 
 function applyMotionOverride(
   humanoid: VRM["humanoid"],
-  base: (h: VRM["humanoid"], name: VRMHumanBoneName, x: number, y: number, z: number) => void,
+  base: (h: VRM["humanoid"], name: VRMHumanBoneName, nx: number, ny: number, nz: number) => void,
   name: VRMHumanBoneName,
-  x: number,
-  y: number,
-  z: number,
+  nx: number,
+  ny: number,
+  nz: number,
 ): void {
   const mo = motionOverride?.[name];
   if (mo) {
     if (motionAbsolute) {
-      eulerToQuat(x, y, z, _qIdle);
+      // Both sides are raw-bone-space quats: the idle delta converted from
+      // the normalized frame, the motion sampled from the v4 bake.
+      const rest = restCache.get(name);
+      const parent = parentCache.get(name);
+      if (!rest || !parent) return;
+      eulerToQuat(nx, ny, nz, _qN);
+      normalizedToRawDelta(_qN, parent, rest, _qIdle);
       deltaToQuat(mo, _qMo);
       _qBlend.copy(_qIdle).slerp(_qMo, motionFade);
       applyDeltaQuat(humanoid, name, _qBlend);
     } else {
-      // additive pose (builtins)
-      base(humanoid, name, x + mo.x, y + mo.y, z + mo.z);
+      // additive pose (builtins): eulers add in the normalized frame
+      base(humanoid, name, nx + mo.x, ny + mo.y, nz + mo.z);
     }
   } else {
-    base(humanoid, name, x, y, z);
+    base(humanoid, name, nx, ny, nz);
   }
 }
 
@@ -252,32 +288,41 @@ function updateBlink(vrm: VRM, dt: number): void {
 
 let breathPhase = 0;
 
+// Idle pose deltas, authored in the NORMALIZED humanoid frame (see
+// pose-space.ts): world-aligned T-pose rest, model facing +Z, viewer's right
+// = +X. Left arm hangs along +X at T-pose, so lowering it rotates about Z
+// toward -Y (z: -1.2); the right arm mirrors. Elbow flexion swings the
+// forearm toward the front (+Z): y: -0.3 left / +0.3 right. Knee flexion
+// swings the shin backward (-Z): +X rotation. Raw-local values would be
+// wrong here — VRM 1.0 bones have identity rest rotations while VRM 0.x
+// exports use Unity's conventions, which is why VRM 1.0 models used to wear
+// this pose arms-up (the +1.2 raise) with twisted forearms.
 const POSE = {
   spine: { x: 0, y: 0, z: 0 },
   chest: { x: 0, y: 0, z: 0 },
   upperChest: { x: 0, y: 0, z: 0 },
   neck: { x: 0, y: 0, z: 0 },
   head: { x: 0, y: 0, z: 0 },
-  leftShoulder: { x: 0, y: 0, z: 0.05 },
-  rightShoulder: { x: 0, y: 0, z: -0.05 },
+  leftShoulder: { x: 0, y: 0, z: -0.05 },
+  rightShoulder: { x: 0, y: 0, z: 0.05 },
   hips: { x: 0, y: 0, z: 0 },
-  leftUpperArm: { x: 0, y: 0, z: 1.2 },
-  rightUpperArm: { x: 0, y: 0, z: -1.2 },
-  leftLowerArm: { x: -0.3, y: 0, z: 0 },
-  rightLowerArm: { x: -0.3, y: 0, z: 0 },
-  leftHand: { x: -0.2, y: 0, z: 0 },
-  rightHand: { x: -0.2, y: 0, z: 0 },
+  leftUpperArm: { x: 0, y: 0, z: -1.2 },
+  rightUpperArm: { x: 0, y: 0, z: 1.2 },
+  leftLowerArm: { x: 0, y: -0.3, z: 0 },
+  rightLowerArm: { x: 0, y: 0.3, z: 0 },
+  leftHand: { x: 0, y: -0.2, z: 0 },
+  rightHand: { x: 0, y: 0.2, z: 0 },
   leftUpperLeg: { x: 0, y: 0, z: 0 },
   rightUpperLeg: { x: 0, y: 0, z: 0 },
-  leftLowerLeg: { x: -0.15, y: 0, z: 0 },
-  rightLowerLeg: { x: -0.15, y: 0, z: 0 },
+  leftLowerLeg: { x: 0.15, y: 0, z: 0 },
+  rightLowerLeg: { x: 0.15, y: 0, z: 0 },
 } as const;
 
 // bones that updateBody applies via applyMotionOverride
 const IDLE_APPLIED = new Set<string>([...Object.keys(POSE), "leftEye", "rightEye"]);
 
 function updateBody(vrm: VRM, dt: number): void {
-  if (firstFrame) captureRest(vrm.humanoid);
+  if (firstFrame) captureRest(vrm);
 
   breathPhase += dt;
 
@@ -293,34 +338,34 @@ function updateBody(vrm: VRM, dt: number): void {
   const weightShift = Math.sin(breathPhase * 0.5);
   const breathY = Math.sin(breathPhase * 1.2) * 0.01;
 
-  applyMotionOverride(vrm.humanoid, applyDelta, "spine", POSE.spine.x, POSE.spine.y + breathY, POSE.spine.z + sway);
-  applyMotionOverride(vrm.humanoid, applyDelta, "chest", POSE.chest.x, POSE.chest.y, POSE.chest.z + sway * 0.6);
-  applyMotionOverride(vrm.humanoid, applyDelta, "upperChest", POSE.upperChest.x, POSE.upperChest.y, POSE.upperChest.z + breath * 0.5);
-  applyMotionOverride(vrm.humanoid, applyDelta, "neck", POSE.neck.x + lookPitch * 0.3, POSE.neck.y + lookYaw * 0.3, POSE.neck.z + Math.sin(breathPhase * 0.5) * 0.02);
-  applyMotionOverride(vrm.humanoid, applyDelta, "head", POSE.head.x + lookPitch, POSE.head.y + lookYaw, POSE.head.z + Math.sin(breathPhase * 0.4) * 0.02);
+  applyMotionOverride(vrm.humanoid, applyPose, "spine", POSE.spine.x, POSE.spine.y + breathY, POSE.spine.z + sway);
+  applyMotionOverride(vrm.humanoid, applyPose, "chest", POSE.chest.x, POSE.chest.y, POSE.chest.z + sway * 0.6);
+  applyMotionOverride(vrm.humanoid, applyPose, "upperChest", POSE.upperChest.x, POSE.upperChest.y, POSE.upperChest.z + breath * 0.5);
+  applyMotionOverride(vrm.humanoid, applyPose, "neck", POSE.neck.x + lookPitch * 0.3, POSE.neck.y + lookYaw * 0.3, POSE.neck.z + Math.sin(breathPhase * 0.5) * 0.02);
+  applyMotionOverride(vrm.humanoid, applyPose, "head", POSE.head.x + lookPitch, POSE.head.y + lookYaw, POSE.head.z + Math.sin(breathPhase * 0.4) * 0.02);
 
-  applyMotionOverride(vrm.humanoid, applyDelta, "leftEye", lookPitch * 0.4, lookYaw * 0.3, 0);
-  applyMotionOverride(vrm.humanoid, applyDelta, "rightEye", lookPitch * 0.4, lookYaw * 0.3, 0);
+  applyMotionOverride(vrm.humanoid, applyPose, "leftEye", lookPitch * 0.4, lookYaw * 0.3, 0);
+  applyMotionOverride(vrm.humanoid, applyPose, "rightEye", lookPitch * 0.4, lookYaw * 0.3, 0);
 
-  applyMotionOverride(vrm.humanoid, applyDelta, "leftShoulder", POSE.leftShoulder.x, POSE.leftShoulder.y, POSE.leftShoulder.z + armBob * 0.3);
-  applyMotionOverride(vrm.humanoid, applyDelta, "rightShoulder", POSE.rightShoulder.x, POSE.rightShoulder.y, POSE.rightShoulder.z - armBob * 0.3);
+  applyMotionOverride(vrm.humanoid, applyPose, "leftShoulder", POSE.leftShoulder.x, POSE.leftShoulder.y, POSE.leftShoulder.z + armBob * 0.3);
+  applyMotionOverride(vrm.humanoid, applyPose, "rightShoulder", POSE.rightShoulder.x, POSE.rightShoulder.y, POSE.rightShoulder.z - armBob * 0.3);
 
-  applyMotionOverride(vrm.humanoid, applyDelta, "hips", POSE.hips.x + breath * 0.3, POSE.hips.y, POSE.hips.z + weightShift * 0);
+  applyMotionOverride(vrm.humanoid, applyPose, "hips", POSE.hips.x + breath * 0.3, POSE.hips.y, POSE.hips.z + weightShift * 0);
 
-  applyMotionOverride(vrm.humanoid, applyDelta, "leftUpperArm", POSE.leftUpperArm.x, POSE.leftUpperArm.y, POSE.leftUpperArm.z + armBob);
-  applyMotionOverride(vrm.humanoid, applyDelta, "rightUpperArm", POSE.rightUpperArm.x, POSE.rightUpperArm.y, POSE.rightUpperArm.z - armBob);
+  applyMotionOverride(vrm.humanoid, applyPose, "leftUpperArm", POSE.leftUpperArm.x, POSE.leftUpperArm.y, POSE.leftUpperArm.z + armBob);
+  applyMotionOverride(vrm.humanoid, applyPose, "rightUpperArm", POSE.rightUpperArm.x, POSE.rightUpperArm.y, POSE.rightUpperArm.z - armBob);
 
-  applyMotionOverride(vrm.humanoid, applyDelta, "leftLowerArm", POSE.leftLowerArm.x + Math.sin(breathPhase * 0.9) * 0.05, POSE.leftLowerArm.y, POSE.leftLowerArm.z);
-  applyMotionOverride(vrm.humanoid, applyDelta, "rightLowerArm", POSE.rightLowerArm.x + Math.sin(breathPhase * 0.9 + 0.5) * 0.05, POSE.rightLowerArm.y, POSE.rightLowerArm.z);
+  applyMotionOverride(vrm.humanoid, applyPose, "leftLowerArm", POSE.leftLowerArm.x, POSE.leftLowerArm.y + Math.sin(breathPhase * 0.9) * 0.05, POSE.leftLowerArm.z);
+  applyMotionOverride(vrm.humanoid, applyPose, "rightLowerArm", POSE.rightLowerArm.x, POSE.rightLowerArm.y + Math.sin(breathPhase * 0.9 + 0.5) * 0.05, POSE.rightLowerArm.z);
 
-  applyMotionOverride(vrm.humanoid, applyDelta, "leftHand", POSE.leftHand.x + Math.sin(breathPhase * 1.3) * 0.06, POSE.leftHand.y, POSE.leftHand.z);
-  applyMotionOverride(vrm.humanoid, applyDelta, "rightHand", POSE.rightHand.x + Math.sin(breathPhase * 1.3 + 0.4) * 0.06, POSE.rightHand.y, POSE.rightHand.z);
+  applyMotionOverride(vrm.humanoid, applyPose, "leftHand", POSE.leftHand.x, POSE.leftHand.y + Math.sin(breathPhase * 1.3) * 0.06, POSE.leftHand.z);
+  applyMotionOverride(vrm.humanoid, applyPose, "rightHand", POSE.rightHand.x, POSE.rightHand.y + Math.sin(breathPhase * 1.3 + 0.4) * 0.06, POSE.rightHand.z);
 
-  applyMotionOverride(vrm.humanoid, applyDelta, "leftUpperLeg", POSE.leftUpperLeg.x, POSE.leftUpperLeg.y, POSE.leftUpperLeg.z + weightShift * 0.015);
-  applyMotionOverride(vrm.humanoid, applyDelta, "rightUpperLeg", POSE.rightUpperLeg.x, POSE.rightUpperLeg.y, POSE.rightUpperLeg.z - weightShift * 0.015);
+  applyMotionOverride(vrm.humanoid, applyPose, "leftUpperLeg", POSE.leftUpperLeg.x, POSE.leftUpperLeg.y, POSE.leftUpperLeg.z + weightShift * 0.015);
+  applyMotionOverride(vrm.humanoid, applyPose, "rightUpperLeg", POSE.rightUpperLeg.x, POSE.rightUpperLeg.y, POSE.rightUpperLeg.z - weightShift * 0.015);
 
-  applyMotionOverride(vrm.humanoid, applyDelta, "leftLowerLeg", POSE.leftLowerLeg.x + Math.sin(breathPhase * 0.6) * 0.015, POSE.leftLowerLeg.y, POSE.leftLowerLeg.z);
-  applyMotionOverride(vrm.humanoid, applyDelta, "rightLowerLeg", POSE.rightLowerLeg.x + Math.sin(breathPhase * 0.6 + 1) * 0.015, POSE.rightLowerLeg.y, POSE.rightLowerLeg.z);
+  applyMotionOverride(vrm.humanoid, applyPose, "leftLowerLeg", POSE.leftLowerLeg.x + Math.sin(breathPhase * 0.6) * 0.015, POSE.leftLowerLeg.y, POSE.leftLowerLeg.z);
+  applyMotionOverride(vrm.humanoid, applyPose, "rightLowerLeg", POSE.rightLowerLeg.x + Math.sin(breathPhase * 0.6 + 1) * 0.015, POSE.rightLowerLeg.y, POSE.rightLowerLeg.z);
 
   const hipsNode = boneNode(vrm.humanoid, "hips");
   if (hipsNode && hipsRestCaptured) {

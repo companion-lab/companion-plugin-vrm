@@ -60,24 +60,27 @@ function sample(
 }
 
 // ─── Built-in poses (registered into the registry at load) ───
+// Authored in the NORMALIZED humanoid frame (see idle/pose-space.ts):
+// world-aligned T-pose rest, model facing +Z. Positive X euler pitches the
+// face down (+Z → -Y), positive Y yaw turns it toward +X (viewer's right).
 
 registerBuiltin(
   "nod",
   {
     neck: [
       { t: 0, v: { x: 0, y: 0, z: 0 } },
-      { t: 0.15, v: { x: -0.35, y: 0, z: 0 } },
-      { t: 0.35, v: { x: 0.15, y: 0, z: 0 } },
-      { t: 0.55, v: { x: -0.25, y: 0, z: 0 } },
-      { t: 0.75, v: { x: 0.15, y: 0, z: 0 } },
+      { t: 0.15, v: { x: 0.35, y: 0, z: 0 } },
+      { t: 0.35, v: { x: -0.15, y: 0, z: 0 } },
+      { t: 0.55, v: { x: 0.25, y: 0, z: 0 } },
+      { t: 0.75, v: { x: -0.15, y: 0, z: 0 } },
       { t: 0.95, v: { x: 0, y: 0, z: 0 } },
     ],
     head: [
       { t: 0, v: { x: 0, y: 0, z: 0 } },
-      { t: 0.15, v: { x: -0.15, y: 0, z: 0 } },
-      { t: 0.35, v: { x: 0.05, y: 0, z: 0 } },
-      { t: 0.55, v: { x: -0.15, y: 0, z: 0 } },
-      { t: 0.75, v: { x: 0.05, y: 0, z: 0 } },
+      { t: 0.15, v: { x: 0.15, y: 0, z: 0 } },
+      { t: 0.35, v: { x: -0.05, y: 0, z: 0 } },
+      { t: 0.55, v: { x: 0.15, y: 0, z: 0 } },
+      { t: 0.75, v: { x: -0.05, y: 0, z: 0 } },
       { t: 0.95, v: { x: 0, y: 0, z: 0 } },
     ],
   },
