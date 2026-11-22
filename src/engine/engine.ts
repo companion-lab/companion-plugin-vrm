@@ -23,6 +23,7 @@ import {
   idleAnimation,
   postIdleAnimation,
   resetIdleState,
+  setIdleClip,
   setMotionOverride,
 } from "./idle/animation";
 import { MotionController } from "./idle/motion";
@@ -34,6 +35,7 @@ import {
 import { loadVrma, parseVrmaAnimation } from "./idle/vrma-loader";
 import { base64ToArrayBuffer } from "./base64";
 import { IdleMixer, loadIdleMixer } from "./idle/idle-mixer";
+import { MOTION_SOURCE_VERSION } from "./idle/registry";
 import { coerceDisplay, DEFAULT_DISPLAY, type DisplaySettings } from "./display";
 import { pollCursorLook, setCursorLookEnabled } from "./cursor-look";
 import { tauriListen } from "../vendor/tauri-events";
@@ -290,6 +292,46 @@ function runEngine(ctx: PluginContext, canvas: HTMLCanvasElement): () => void {
         });
         sceneRef.current = scene;
         idleMixerRef.current = new IdleMixer();
+
+        // Bundled animation clips (assets/animations/): Idle.vrma drives the
+        // base idle on the normalized rig (replacing the manual pose
+        // fallback), and nod/shake/think override their hand-coded poses.
+        // Failures fall back to the manual layers — fire-and-forget.
+        void (async () => {
+          try {
+            const names = await callWithRetry(
+              () => ctx.backend.call<string[]>("vrm.list_builtin_animations"),
+              ctx.log,
+              "list_builtin_animations",
+            );
+            for (const name of names ?? []) {
+              const b64 = await callWithRetry(
+                () => ctx.backend.call<string>("vrm.load_builtin_animation", { name }),
+                ctx.log,
+                "load_builtin_animation",
+              );
+              const anim = await parseVrmaAnimation(await base64ToArrayBuffer(b64));
+              if (/^idle/i.test(name)) {
+                setIdleClip(anim);
+                ctx.log.info("builtin idle clip loaded: ${name} (${anim.duration.toFixed(1)}s)");
+              } else {
+                registerCustom({
+                  name,
+                  duration: anim.duration,
+                  version: MOTION_SOURCE_VERSION,
+                  pose: { fmt: 6, source: b64 },
+                  anim,
+                  description: "built-in ${name} animation",
+                } as never);
+                ctx.log.info("builtin animation registered: ${name}");
+              }
+            }
+          } catch (err) {
+            ctx.log.warn(
+              "builtin animation assets unavailable (${err instanceof Error ? err.message : String(err)}); using manual pose fallbacks",
+            );
+          }
+        })();
 
         // Persisted display settings, so scale/offset/tracking survive
         // reloads (same storage key the settings section writes).

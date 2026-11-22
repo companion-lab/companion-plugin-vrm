@@ -153,7 +153,13 @@ export function listCustomMotions(): MotionEntry[] {
 }
 
 export function listMotionNames(): string[] {
-  return ["none", ...custom.keys(), ...builtins.keys()];
+  const names = ["none", ...custom.keys()];
+  // Asset-loaded customs can shadow builtins of the same name — list each
+  // resolvable name once.
+  for (const b of builtins.keys()) {
+    if (!custom.has(b)) names.push(b);
+  }
+  return names;
 }
 
 export function isCustomMotion(name: string): boolean {

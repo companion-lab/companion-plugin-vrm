@@ -4,6 +4,8 @@ import { VRMHandle } from "../loader";
 import type { MotionDelta, MotionState } from "./motion";
 import type { ExpressionController } from "../expression/controller";
 import { updateCursorLook } from "../cursor-look";
+import type { VRMAnimation } from "@pixiv/three-vrm-animation";
+import { sampleVrmaPose } from "./motion";
 
 const _euler = new THREE.Euler();
 const _qIdle = new THREE.Quaternion();
@@ -316,8 +318,30 @@ const POSE = {
 // bones that updateBody applies via applyMotionOverride
 const IDLE_APPLIED = new Set<string>([...Object.keys(POSE), "leftEye", "rightEye"]);
 
+// The bundled idle clip (assets/animations/Idle.vrma), when available: it owns
+// the base pose and is sampled on a loop each frame — replacing the manual
+// POSE fallback below, exactly like the vrma-editor reference drives an
+// animation. The manual pose stays as the fallback when no clip loads.
+let idleClip: VRMAnimation | null = null;
+let idleTime = 0;
+const IDENTITY_DELTA: MotionDelta = { x: 0, y: 0, z: 0, w: 1 };
+const _qB = new THREE.Quaternion();
+const _qLook = new THREE.Quaternion();
+const _hipsMotion = new THREE.Vector3();
+
+/** Install the bundled idle clip (null restores the manual pose fallback). */
+export function setIdleClip(anim: VRMAnimation | null): void {
+  idleClip = anim;
+  idleTime = 0;
+}
+
 function updateBody(vrm: VRM, dt: number): void {
   if (firstFrame) captureRest(vrm);
+
+  if (idleClip) {
+    updateIdleClipBody(vrm, dt);
+    return;
+  }
 
   breathPhase += dt;
 
@@ -391,6 +415,84 @@ function updateBody(vrm: VRM, dt: number): void {
 }
 
 const _hipsTarget = new THREE.Vector3();
+
+// The idle-clip body: samples the bundled idle clip on a loop and writes the
+// normalized rig directly — the vrma-editor reference's applyPose pattern.
+// The idle clip owns the base pose; motions blend over it (absolute slerp /
+// additive multiply) and the cursor look pre-multiplies onto neck/head/eyes.
+function updateIdleClipBody(vrm: VRM, dt: number): void {
+  const humanoid = vrm.humanoid;
+  if (!humanoid || !idleClip) return;
+  idleTime = (idleTime + dt) % Math.max(idleClip.duration, 0.05);
+  const { state, hipsPos, hipsRestY } = sampleVrmaPose(idleClip, idleTime);
+  const cursor = updateCursorLook(dt);
+  const lookPitch = cursor.pitch;
+  const lookYaw = cursor.yaw;
+
+  for (const name of Object.keys(humanoid.humanBones)) {
+    const boneName = name as VRMHumanBoneName;
+    const node = boneNode(humanoid, boneName);
+    if (!node) continue;
+    const q = canonicalToRigQuat(state[name] ?? IDENTITY_DELTA, _qB);
+    const mo = motionOverride?.[name];
+    if (mo) {
+      canonicalToRigQuat(mo, _qMo);
+      if (motionAbsolute) {
+        _qB.copy(q).slerp(_qMo, motionFade);
+      } else {
+        // additive legacy pose: rotate the idle pose by the delta
+        _qB.copy(q).multiply(_qMo);
+      }
+    }
+    // Cursor look rides on top of the clip pose (a small world-frame turn,
+    // pre-multiplied; weights mirror the manual fallback).
+    let pitchW = 0;
+    let yawW = 0;
+    if (name === "head") { pitchW = 1; yawW = 1; }
+    else if (name === "neck") { pitchW = 0.3; yawW = 0.3; }
+    else if (name === "leftEye" || name === "rightEye") { pitchW = 0.4; yawW = 0.3; }
+    if ((pitchW || yawW) && !(motionAbsolute && motionOverride?.[name])) {
+      idleEulerToRigQuat(lookPitch * pitchW, lookYaw * yawW, 0, _qLook);
+      node.quaternion.copy(_qB.premultiply(_qLook));
+      continue;
+    }
+    node.quaternion.copy(_qB);
+  }
+
+  // Hips position: the clip's translation (rescaled to the model, x/z
+  // mirrored for VRM 0.x), with an active motion's root motion blended over
+  // it by the fade. Horizontal leash keeps the avatar anchored.
+  const hipsNode = boneNode(humanoid, "hips");
+  if (hipsNode && hipsRestCaptured) {
+    hipsNode.position.copy(restHipsPos);
+    if (hipsPos && hipsRestY && hipsRestY > 1e-3) {
+      const s = restHipsPos.y / hipsRestY;
+      _hipsTarget.set(
+        vrmIsVrm0 ? -hipsPos.x * s : hipsPos.x * s,
+        hipsPos.y * s,
+        vrmIsVrm0 ? -hipsPos.z * s : hipsPos.z * s,
+      );
+      hipsNode.position.lerp(_hipsTarget, 1);
+    }
+    if (motionHipsPos && motionHipsRestY && motionHipsRestY > 1e-3) {
+      const s = restHipsPos.y / motionHipsRestY;
+      _hipsMotion.set(
+        vrmIsVrm0 ? -motionHipsPos.x * s : motionHipsPos.x * s,
+        motionHipsPos.y * s,
+        vrmIsVrm0 ? -motionHipsPos.z * s : motionHipsPos.z * s,
+      );
+      hipsNode.position.lerp(_hipsMotion, motionFade);
+    }
+    const dx = hipsNode.position.x - restHipsPos.x;
+    const dz = hipsNode.position.z - restHipsPos.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist > HIPS_LEASH_RADIUS) {
+      const k = HIPS_LEASH_RADIUS / dist;
+      hipsNode.position.x = restHipsPos.x + dx * k;
+      hipsNode.position.z = restHipsPos.z + dz * k;
+    }
+  }
+}
 
 export function idleAnimation(handle: VRMHandle, _t: number, dt: number, expr?: ExpressionController | null): void {
   const vrm = handle.vrm;

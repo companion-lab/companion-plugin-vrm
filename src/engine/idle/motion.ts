@@ -225,6 +225,34 @@ function sampleVec3Track(track: { times: ArrayLike<number>; values: Float32Array
   out.copy(_vA).lerp(_vB, k);
 }
 
+/** Samples a parsed VRMAnimation at time t: canonical normalized-frame
+ *  rotations (rest-relative, identity at rest) plus the canonical hips
+ *  position. Model-dependent handling (VRM 0.x flip + hips rescale) happens
+ *  in animation.ts against the current model. Shared by motion playback and
+ *  the idle-clip loop. */
+export function sampleVrmaPose(anim: VRMAnimation, t: number): {
+  state: MotionState;
+  hipsPos?: MotionDelta;
+  hipsRestY?: number;
+} {
+  const state: MotionState = {};
+  for (const [bone, track] of anim.humanoidTracks.rotation.entries()) {
+    const q = new THREE.Quaternion();
+    sampleQuatTrack(track, t, q);
+    state[bone] = { x: q.x, y: q.y, z: q.z, w: q.w };
+  }
+  let hipsPos: MotionDelta | undefined;
+  let hipsRestY: number | undefined;
+  const hipsTrack = anim.humanoidTracks.translation.get("hips");
+  if (hipsTrack) {
+    const v = new THREE.Vector3();
+    sampleVec3Track(hipsTrack, t, v);
+    hipsPos = { x: v.x, y: v.y, z: v.z };
+    hipsRestY = anim.restHipsPosition.y;
+  }
+  return { state, hipsPos, hipsRestY };
+}
+
 export class MotionController {
   private current: string | null = null;
   private t = 0;
@@ -287,31 +315,16 @@ export class MotionController {
     const out: MotionState = {};
 
     if (entry.anim) {
-      // Custom .vrma clip: sample the parsed tracks — canonical normalized-
-      // frame rotations (rest-relative, identity at rest) and the canonical
-      // hips position. Per-model handling (VRM 0.x flip + hips rescale)
-      // happens in animation.ts against the current model.
-      const anim = entry.anim;
-      for (const [bone, track] of anim.humanoidTracks.rotation.entries()) {
-        const q = new THREE.Quaternion();
-        sampleQuatTrack(track, sampleT, q);
-        out[bone] = { x: q.x, y: q.y, z: q.z, w: q.w };
-      }
-      let hipsPos: MotionDelta | undefined;
-      let hipsRestY: number | undefined;
-      const hipsTrack = anim.humanoidTracks.translation.get("hips");
-      if (hipsTrack) {
-        const v = new THREE.Vector3();
-        sampleVec3Track(hipsTrack, sampleT, v);
-        hipsPos = { x: v.x, y: v.y, z: v.z };
-        hipsRestY = anim.restHipsPosition.y;
-      }
+      // Custom .vrma clip: sample the parsed tracks. Per-model handling
+      // (VRM 0.x flip + hips rescale) happens in animation.ts against the
+      // current model.
+      const sampled = sampleVrmaPose(entry.anim, sampleT);
       return {
-        state: out,
+        state: sampled.state,
         absolute: true,
         fade: this.fade,
-        hipsPos,
-        hipsRestY,
+        hipsPos: sampled.hipsPos,
+        hipsRestY: sampled.hipsRestY,
       };
     }
 

@@ -363,6 +363,64 @@ impl Library {
         Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
     }
 
+    // ─── Built-in animation assets (assets/animations/*.vrma) ───
+
+    /// Directory holding the built-in animation clips. Resolution mirrors
+    /// `assets_model_dir`: the staged package `assets/animations/` first,
+    /// then the dev-checkout source tree.
+    fn assets_animations_dir(&self) -> Option<PathBuf> {
+        if let Some(plugin_dir) = &self.plugin_dir {
+            let staged = plugin_dir.join("assets").join("animations");
+            if staged.is_dir() {
+                return Some(staged);
+            }
+        }
+        let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("assets")
+            .join("animations");
+        if dev.is_dir() {
+            return Some(dev);
+        }
+        None
+    }
+
+    /// Names (file stems) of the built-in .vrma clips, sorted.
+    fn op_list_builtin_animations(&self) -> Result<Vec<String>, String> {
+        let dir = self
+            .assets_animations_dir()
+            .ok_or("built-in animation assets are missing from the plugin package")?;
+        let mut names = Vec::new();
+        for entry in fs::read_dir(&dir).map_err(|e| format!("read animations dir: {e}"))? {
+            let path = match entry {
+                Ok(e) => e.path(),
+                Err(_) => continue,
+            };
+            if path.extension().and_then(|x| x.to_str()) != Some("vrma") {
+                continue;
+            }
+            if let Some(stem) = path.file_stem().and_then(|x| x.to_str()) {
+                names.push(stem.to_string());
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    /// Base64 of a built-in .vrma clip by name (file stem, no separators).
+    fn op_load_builtin_animation(&self, name: &str) -> Result<String, String> {
+        use base64::Engine;
+        if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+            return Err("invalid animation name".into());
+        }
+        let dir = self
+            .assets_animations_dir()
+            .ok_or("built-in animation assets are missing from the plugin package")?;
+        let bytes = fs::read(dir.join(format!("{name}.vrma")))
+            .map_err(|e| format!("read animation {name}: {e}"))?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
     // ─── VRM Model operations (former tauri commands) ───
 
     fn op_list_models(&self) -> Result<Vec<ModelMeta>, String> {
@@ -847,6 +905,13 @@ impl Library {
             // Built-in demo model, served from the plugin package assets.
             "vrm.load_builtin_model" | "library.load_builtin_model" | "load_builtin_model" => {
                 json_ok(self.op_load_builtin_model()?)
+            }
+            // Built-in .vrma clips (assets/animations/), served the same way.
+            "vrm.list_builtin_animations" | "library.list_builtin_animations" => {
+                json_ok(self.op_list_builtin_animations()?)
+            }
+            "vrm.load_builtin_animation" | "library.load_builtin_animation" => {
+                json_ok(self.op_load_builtin_animation(&arg("name")?)?)
             }
             "vrm.delete_model" | "library.delete_model" | "delete_custom_model" => {
                 self.op_delete_model(arg("id")?)?;
