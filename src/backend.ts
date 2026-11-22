@@ -5,12 +5,12 @@
 
 import { useCallback } from "react";
 import type { PluginContext } from "@companion-lab/plugin";
-// Bake format lives with the engine that creates the bakes (idle/registry.ts);
-// entries carrying any other version are stale bakes and get deleted on load
-// (see fetchFreshLibrary in index.tsx).
-import { MOTION_BAKE_VERSION } from "./engine/idle/registry";
+// The stored-clip format lives with the engine (idle/registry.ts): fmt-6
+// entries carry their original .vrma source; anything older has no playback
+// path and gets deleted on load (see fetchFreshLibrary in index.tsx).
+import { MOTION_SOURCE_VERSION } from "./engine/idle/registry";
 
-export { MOTION_BAKE_VERSION };
+export { MOTION_SOURCE_VERSION };
 
 // ─── Shapes returned by the Rust backend (features/vrm/backend) ───
 

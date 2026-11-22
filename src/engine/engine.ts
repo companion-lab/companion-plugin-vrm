@@ -21,6 +21,7 @@ import { LipSyncController } from "./lipsync/controller";
 import {
   captureGroundReference,
   idleAnimation,
+  postIdleAnimation,
   resetIdleState,
   setMotionOverride,
 } from "./idle/animation";
@@ -30,7 +31,7 @@ import {
   listMotionNames,
   registerCustom,
 } from "./idle/registry";
-import { loadVrma } from "./idle/vrma-loader";
+import { loadVrma, parseVrmaAnimation } from "./idle/vrma-loader";
 import { base64ToArrayBuffer } from "./base64";
 import { IdleMixer, loadIdleMixer } from "./idle/idle-mixer";
 import { coerceDisplay, DEFAULT_DISPLAY, type DisplaySettings } from "./display";
@@ -138,9 +139,10 @@ function runEngine(ctx: PluginContext, canvas: HTMLCanvasElement): () => void {
     handleRef.current = vrm;
     vrm.scene.position.y = 0.6;
     scene.stage.add(vrm.scene);
-    if (vrm.vrm?.humanoid) {
-      vrm.vrm.humanoid.autoUpdateHumanBones = false;
-    }
+    // The engine drives the NORMALIZED rig (autoUpdateHumanBones stays on, the
+    // three-vrm default): every frame the idle pose + motion sampler write the
+    // normalized bones and vrm.update() propagates them onto the raw skeleton —
+    // the vrma-editor reference's pipeline, identical for VRM 0.x and 1.0.
     if (vrm.vrm) {
       captureGroundReference(vrm.vrm);
     }
@@ -212,7 +214,10 @@ function runEngine(ctx: PluginContext, canvas: HTMLCanvasElement): () => void {
         lipsRef.current?.setViseme(name as never, weight);
       }
     },
-    registerMotion: (def) => registerCustom(def as never),
+    registerMotion: (def) =>
+      registerCustom(def as never, async (source) =>
+        parseVrmaAnimation(await base64ToArrayBuffer(source)),
+      ),
     registerEmotion: (def) => registerCustomEmotion(def as never),
     loadModel: async (source) => {
       if (source.base64) {
@@ -232,7 +237,9 @@ function runEngine(ctx: PluginContext, canvas: HTMLCanvasElement): () => void {
       clearCustomMotions();
       clearCustomEmotions();
       for (const m of motions) {
-        registerCustom(m as never);
+        registerCustom(m as never, async (source) =>
+          parseVrmaAnimation(await base64ToArrayBuffer(source)),
+        );
       }
       for (const e of emotions) {
         registerCustomEmotion(e as never);
@@ -328,9 +335,14 @@ function runEngine(ctx: PluginContext, canvas: HTMLCanvasElement): () => void {
             mo?.absolute ?? false,
             mo?.fade ?? 1,
             mo?.hipsPos ?? null,
+            mo?.hipsRestY,
           );
-          handle?.vrm?.update(dt);
+          // Pose the normalized rig (idle + motion), then propagate onto the
+          // raw skeleton and run the remaining components — the reference
+          // editor's applyPose → vrm.update order.
           if (handle) idleAnimation(handle, t, dt, exprRef.current);
+          handle?.vrm?.update(dt);
+          if (handle) postIdleAnimation(handle);
         });
         return;
       } catch (e) {

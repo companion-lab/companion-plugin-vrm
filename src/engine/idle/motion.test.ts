@@ -1,3 +1,5 @@
+import * as THREE from "three";
+import type { VRMAnimation } from "@pixiv/three-vrm-animation";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import "./motion";
 import { registerCustom, clearCustomMotions } from "./registry";
@@ -142,14 +144,6 @@ describe("update", () => {
     expect(m.isActive()).toBe(false);
   });
 
-  it("reports hips position when the clip has one", () => {
-    clip({ hipsPos: [{ t: 0, v: { x: 0, y: 0, z: 0.1 } }] });
-    const m = new MotionController();
-    m.trigger("wave");
-    const u = m.update(0.5);
-    expect(u!.hipsPos).toBeDefined();
-  });
-
   it("omits hips position when the clip has none", () => {
     clip();
     const m = new MotionController();
@@ -196,71 +190,73 @@ describe("quaternion keyframes", () => {
   });
 });
 
-// ─── v4 baked tracks (base64 Float32 blobs, decoded in registry.ts) ───
-
-/** Encode floats the way vrma-loader.ts does (base64 of the f32 bytes). */
-function f32b64(nums: number[]): string {
-  const bytes = new Uint8Array(new Float32Array(nums).buffer);
-  let bin = "";
-  for (const b of bytes) bin += String.fromCharCode(b);
-  return btoa(bin);
-}
+// ─── fmt-6 .vrma sources (parsed VRMAnimation, model-independent) ───
 
 // identity → yaw 90° → pitch 90°, on a 3-frame grid at t = 0, 1, 2.
 const S = Math.SQRT1_2;
-const V4_TRACK = {
-  fmt: 4 as const,
-  times: f32b64([0, 1, 2]),
-  bones: {
-    head: f32b64([0, 0, 0, 1, 0, S, 0, S, S, 0, 0, S]),
-  },
-  hipsPos: f32b64([0, 0, 0, 0, 0.1, 0, 0, 0.2, 0]),
-};
 
-function v4clip() {
-  registerCustom({ name: "v4spin", duration: 2, version: 4, pose: V4_TRACK });
+function makeAnim(): VRMAnimation {
+  const anim = new (class {} as any) as VRMAnimation;
+  // VRMAnimation is a plain data class; build the shape the loader produces.
+  (anim as any).duration = 2;
+  (anim as any).restHipsPosition = new THREE.Vector3(0, 1, 0);
+  (anim as any).humanoidTracks = {
+    rotation: new Map([
+      [
+        "head",
+        {
+          times: [0, 1, 2],
+          values: new Float32Array([0, 0, 0, 1, 0, S, 0, S, S, 0, 0, S]),
+        },
+      ],
+    ]),
+    translation: new Map([
+      [
+        "hips",
+        {
+          times: [0, 1, 2],
+          values: new Float32Array([0, 0, 0, 0, 0.1, 0, 0, 0.2, 0]),
+        },
+      ],
+    ]),
+  };
+  (anim as any).expressionTracks = { preset: new Map(), custom: new Map() };
+  (anim as any).lookAtTrack = null;
+  return anim;
 }
 
-describe("v4 baked tracks", () => {
-  it("registers and activates a v4 bake", () => {
-    v4clip();
+function sourceClip(over: Record<string, unknown> = {}) {
+  registerCustom(
+    {
+      name: "vrma",
+      duration: 2,
+      version: 6,
+      pose: { fmt: 6, source: "ZmFrZQ==" },
+      anim: makeAnim(),
+      ...over,
+    } as never,
+  );
+}
+
+describe("fmt-6 .vrma sources", () => {
+  it("samples canonical quats from the parsed animation", () => {
+    sourceClip();
     const m = new MotionController();
-    m.trigger("v4spin");
+    m.trigger("vrma");
     expect(m.isActive()).toBe(true);
     expect(m.isAbsolute()).toBe(true);
-  });
-
-  it("holds the first frame at t=0", () => {
-    v4clip();
-    const m = new MotionController();
-    m.trigger("v4spin");
-    const u = m.update(0);
-    // the raw sampled delta is the first frame quat (identity), whatever
-    // the ramp weight happens to be
-    const q = u!.state.head!;
-    expect(q.x).toBeCloseTo(0, 5);
-    expect(q.y).toBeCloseTo(0, 5);
-    expect(q.z).toBeCloseTo(0, 5);
-    expect(q.w).toBeCloseTo(1, 5);
-  });
-
-  it("samples the quats along the track at full blend", () => {
-    v4clip();
-    const m = new MotionController();
-    m.trigger("v4spin");
     m.update(1.0); // consume the ramp
-    const u = m.update(0.0); // sampleT lands exactly on frame 1 (yaw 90°)
+    const u = m.update(0.0); // frame 1: yaw 90°
     const q = u!.state.head!;
     expect(q.y).toBeCloseTo(S, 5);
     expect(q.w).toBeCloseTo(S, 5);
-    // Unit length preserved through the typed-array slerp.
     expect(Math.hypot(q.x!, q.y!, q.z!, q.w!)).toBeCloseTo(1, 5);
   });
 
   it("interpolates between frames rather than snapping", () => {
-    v4clip();
+    sourceClip();
     const m = new MotionController();
-    m.trigger("v4spin");
+    m.trigger("vrma");
     m.update(1.0);
     // sampleT = 1.5: halfway between yaw 90° and pitch 90°
     const u = m.update(0.5);
@@ -268,16 +264,13 @@ describe("v4 baked tracks", () => {
     expect(q.w).toBeGreaterThan(0.3);
     expect(q.x).toBeGreaterThan(0);
     expect(q.y).toBeGreaterThan(0);
-    // still a rotation, not a component lerp artifact
     expect(Math.hypot(q.x!, q.y!, q.z!, q.w!)).toBeCloseTo(1, 5);
   });
 
   it("holds the last frame during fade-out", () => {
-    v4clip();
+    sourceClip();
     const m = new MotionController();
-    m.trigger("v4spin");
-    // Fade is <1 through the ramp-in too; the LAST fade sample is always
-    // past the clip end, where sampleT clamps to the final frame.
+    m.trigger("vrma");
     const fadeSamples: Array<{ x: number; y: number; z: number; w?: number }> = [];
     while (m.isActive()) {
       const u = m.update(0.6);
@@ -291,27 +284,30 @@ describe("v4 baked tracks", () => {
     expect(m.isActive()).toBe(false);
   });
 
-  it("reports hips position along the track", () => {
-    v4clip();
+  it("reports the canonical hips position and rest height", () => {
+    sourceClip();
     const m = new MotionController();
-    m.trigger("v4spin");
+    m.trigger("vrma");
     m.update(1.0);
     expect(m.update(0.0)!.hipsPos?.y).toBeCloseTo(0.1, 5);
     const mid = m.update(0.5); // sampleT = 1.5
     expect(mid!.hipsPos?.y).toBeCloseTo(0.15, 5);
+    expect(mid!.hipsRestY).toBeCloseTo(1, 5);
   });
 
-  it("rejects a corrupt v4 blob instead of registering garbage", () => {
+  it("holds idle while the async parse is still running", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     registerCustom({
-      name: "broken",
+      name: "pending",
       duration: 2,
-      version: 4,
-      pose: { fmt: 4, times: f32b64([0, 1, 2]), bones: { head: f32b64([0, 0, 0, 1]) } },
-    });
+      version: 6,
+      pose: { fmt: 6, source: "ZmFrZQ==" },
+      // no anim: still "parsing"
+    } as never);
     const m = new MotionController();
-    m.trigger("broken");
-    expect(m.isActive()).toBe(false);
+    m.trigger("pending");
+    expect(m.isActive()).toBe(true);
+    expect(m.update(0.1)).toBeNull();
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
   });

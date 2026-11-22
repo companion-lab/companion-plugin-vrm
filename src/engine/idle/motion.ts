@@ -1,11 +1,11 @@
 import * as THREE from "three";
+import type { VRMAnimation } from "@pixiv/three-vrm-animation";
 import {
   registerBuiltin,
   getMotion,
   resolveMotionName,
   isCustomMotion,
   type Keyframe,
-  type MotionTracks,
 } from "./registry";
 
 export type { Keyframe } from "./registry";
@@ -60,9 +60,10 @@ function sample(
 }
 
 // ─── Built-in poses (registered into the registry at load) ───
-// Authored in the NORMALIZED humanoid frame (see idle/pose-space.ts):
-// world-aligned T-pose rest, model facing +Z. Positive X euler pitches the
-// face down (+Z → -Y), positive Y yaw turns it toward +X (viewer's right).
+// Authored in the NORMALIZED humanoid frame (the space the vrma-editor
+// reference drives): world-aligned T-pose rest, model facing +Z. Positive X
+// euler pitches the face down (+Z → -Y), positive Y yaw turns it toward +X
+// (viewer's right).
 
 registerBuiltin(
   "nod",
@@ -139,7 +140,12 @@ export type MotionUpdate = {
   state: MotionState;
   absolute: boolean;
   fade: number;
+  /** Sampled canonical-space hips position (custom clips with a translation
+   *  track). animation.ts flips x/z for VRM 0.x and rescales by
+   *  modelRestHips.y / hipsRestY before writing the normalized hips node. */
   hipsPos?: MotionDelta;
+  /** The animation's authored rest hips height (the rescale denominator). */
+  hipsRestY?: number;
 };
 
 // Blend in/out times, seconds
@@ -151,12 +157,81 @@ function smootherstep(t: number): number {
   return t * t * t * (t * (t * 6 - 15) + 10);
 }
 
+// Greatest i with times[i] <= t (log2(n) per bone per frame, immune to float
+// drift in dt).
+function trackIndex(times: ArrayLike<number>, t: number): number {
+  const last = times.length - 1;
+  if (t <= times[0]) return 0;
+  if (t >= times[last]) return last;
+  let lo = 0;
+  let hi = last;
+  while (lo < hi - 1) {
+    const mid = (lo + hi) >> 1;
+    if (times[mid] <= t) lo = mid;
+    else hi = mid;
+  }
+  return lo;
+}
+
+const _tA = new THREE.Quaternion();
+const _tB = new THREE.Quaternion();
+const _tOut = new THREE.Quaternion();
+
+// Linear slerp between the bracketing keys; holds first/last past the ends.
+function sampleQuatTrack(track: { times: ArrayLike<number>; values: Float32Array }, t: number, out: THREE.Quaternion): void {
+  const { times, values } = track;
+  if (times.length === 0) {
+    out.identity();
+    return;
+  }
+  const idx = trackIndex(times, t);
+  const i4 = idx * 4;
+  _tA.set(values[i4], values[i4 + 1], values[i4 + 2], values[i4 + 3]);
+  const last = times.length - 1;
+  if (idx >= last) {
+    out.copy(_tA);
+    return;
+  }
+  const next = idx + 1;
+  const span = times[next] - times[idx];
+  const k = span > 0 ? (t - times[idx]) / span : 0;
+  const j4 = next * 4;
+  _tB.set(values[j4], values[j4 + 1], values[j4 + 2], values[j4 + 3]);
+  out.slerpQuaternions(_tA, _tB, k);
+}
+
+const _vA = new THREE.Vector3();
+const _vB = new THREE.Vector3();
+
+function sampleVec3Track(track: { times: ArrayLike<number>; values: Float32Array }, t: number, out: THREE.Vector3): void {
+  const { times, values } = track;
+  if (times.length === 0) {
+    out.set(0, 0, 0);
+    return;
+  }
+  const idx = trackIndex(times, t);
+  const i3 = idx * 3;
+  _vA.set(values[i3], values[i3 + 1], values[i3 + 2]);
+  const last = times.length - 1;
+  if (idx >= last) {
+    out.copy(_vA);
+    return;
+  }
+  const next = idx + 1;
+  const span = times[next] - times[idx];
+  const k = span > 0 ? (t - times[idx]) / span : 0;
+  const j3 = next * 3;
+  _vB.set(values[j3], values[j3 + 1], values[j3 + 2]);
+  out.copy(_vA).lerp(_vB, k);
+}
+
 export class MotionController {
   private current: string | null = null;
   private t = 0;
   private duration = 0;
   private fadeT = 0;
   private fade = 1;
+  private warnedNoAnim = new Set<string>();
 
   trigger(motion: string): void {
     if (!motion || motion === "none") return;
@@ -210,24 +285,55 @@ export class MotionController {
 
     const sampleT = Math.min(this.t, this.duration);
     const out: MotionState = {};
-    let hipsPos: MotionDelta | undefined;
-    if (entry.tracks) {
-      // v4 bake: shared time grid + per-bone quat blobs, linear slerp.
-      hipsPos = sampleTracks(entry.tracks, sampleT, out);
-    } else {
-      for (const [bone, frames] of Object.entries(entry.pose ?? {})) {
-        const v = sampleHold(frames, sampleT);
-        if (v) out[bone] = v;
+
+    if (entry.anim) {
+      // Custom .vrma clip: sample the parsed tracks — canonical normalized-
+      // frame rotations (rest-relative, identity at rest) and the canonical
+      // hips position. Per-model handling (VRM 0.x flip + hips rescale)
+      // happens in animation.ts against the current model.
+      const anim = entry.anim;
+      for (const [bone, track] of anim.humanoidTracks.rotation.entries()) {
+        const q = new THREE.Quaternion();
+        sampleQuatTrack(track, sampleT, q);
+        out[bone] = { x: q.x, y: q.y, z: q.z, w: q.w };
       }
-      hipsPos = entry.hipsPos
-        ? (sampleHold(entry.hipsPos, sampleT) ?? undefined)
-        : undefined;
+      let hipsPos: MotionDelta | undefined;
+      let hipsRestY: number | undefined;
+      const hipsTrack = anim.humanoidTracks.translation.get("hips");
+      if (hipsTrack) {
+        const v = new THREE.Vector3();
+        sampleVec3Track(hipsTrack, sampleT, v);
+        hipsPos = { x: v.x, y: v.y, z: v.z };
+        hipsRestY = anim.restHipsPosition.y;
+      }
+      return {
+        state: out,
+        absolute: true,
+        fade: this.fade,
+        hipsPos,
+        hipsRestY,
+      };
+    }
+
+    if (entry.source && !entry.anim) {
+      // fmt-6 source registered but its async parse hasn't resolved yet:
+      // stay active, keep the idle pose on screen until the clip is ready.
+      if (!this.warnedNoAnim.has(this.current)) {
+        this.warnedNoAnim.add(this.current);
+        console.warn(`[motion] "${this.current}" is still parsing; holding idle`);
+      }
+      return null;
+    }
+
+    // Authored keyframes (built-ins; legacy cross-plugin pose customs).
+    for (const [bone, frames] of Object.entries(entry.pose ?? {})) {
+      const v = sampleHold(frames, sampleT);
+      if (v) out[bone] = v;
     }
     return {
       state: out,
       absolute: this.isAbsolute(),
       fade: this.fade,
-      hipsPos,
     };
   }
 }
@@ -237,66 +343,4 @@ function sampleHold(frames: Keyframe[], t: number) {
   if (!frames.length) return null;
   if (t >= frames[frames.length - 1].t) return frames[frames.length - 1].v;
   return sample(frames, t);
-}
-
-// ─── v4 baked tracks (base64 Float32 blobs, decoded in registry.ts) ───
-
-const _bA = new THREE.Quaternion();
-const _bB = new THREE.Quaternion();
-const _bOut = new THREE.Quaternion();
-
-// Greatest i with times[i] <= t. The grid is uniform, but binary-search
-// anyway — log2(n) per bone per frame and immune to float drift in dt.
-function trackIndex(times: Float32Array, t: number): number {
-  const last = times.length - 1;
-  if (t <= times[0]) return 0;
-  if (t >= times[last]) return last;
-  let lo = 0;
-  let hi = last;
-  while (lo < hi - 1) {
-    const mid = (lo + hi) >> 1;
-    if (times[mid] <= t) lo = mid;
-    else hi = mid;
-  }
-  return lo;
-}
-
-// Samples every bone (and hips, when present) at t into out. Holds the last
-// frame past the end (fade-out), first frame before the start.
-function sampleTracks(
-  tracks: MotionTracks,
-  t: number,
-  out: MotionState,
-): MotionDelta | undefined {
-  const { times } = tracks;
-  const last = times.length - 1;
-  const idx = trackIndex(times, t);
-  const span = idx < last ? times[idx + 1] - times[idx] : 0;
-  const k = span > 0 ? (t - times[idx]) / span : 0;
-
-  for (const [bone, values] of Object.entries(tracks.bones)) {
-    const i4 = idx * 4;
-    if (idx >= last || span <= 0) {
-      out[bone] = { x: values[i4], y: values[i4 + 1], z: values[i4 + 2], w: values[i4 + 3] };
-      continue;
-    }
-    _bA.set(values[i4], values[i4 + 1], values[i4 + 2], values[i4 + 3]);
-    const j4 = i4 + 4;
-    _bB.set(values[j4], values[j4 + 1], values[j4 + 2], values[j4 + 3]);
-    _bOut.slerpQuaternions(_bA, _bB, k);
-    out[bone] = { x: _bOut.x, y: _bOut.y, z: _bOut.z, w: _bOut.w };
-  }
-
-  if (!tracks.hipsPos) return undefined;
-  const values = tracks.hipsPos;
-  const i3 = idx * 3;
-  if (idx >= last || span <= 0) {
-    return { x: values[i3], y: values[i3 + 1], z: values[i3 + 2] };
-  }
-  const j3 = i3 + 3;
-  return {
-    x: lerp(values[i3], values[j3], k),
-    y: lerp(values[i3 + 1], values[j3 + 1], k),
-    z: lerp(values[i3 + 2], values[j3 + 2], k),
-  };
 }

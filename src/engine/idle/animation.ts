@@ -4,11 +4,8 @@ import { VRMHandle } from "../loader";
 import type { MotionDelta, MotionState } from "./motion";
 import type { ExpressionController } from "../expression/controller";
 import { updateCursorLook } from "../cursor-look";
-import { normalizedToRawDelta } from "./pose-space";
 
 const _euler = new THREE.Euler();
-const _qN = new THREE.Quaternion();
-const _delta = new THREE.Quaternion();
 const _qIdle = new THREE.Quaternion();
 const _qMo = new THREE.Quaternion();
 const _qBlend = new THREE.Quaternion();
@@ -16,6 +13,14 @@ const restHipsPos = new THREE.Vector3();
 let hipsRestCaptured = false;
 let restGroundY = 0;
 let groundReady = false;
+// The rescale denominator for custom-clip hips positions: the animation's
+// authored rest hips height (MotionUpdate.hipsRestY).
+let motionHipsRestY: number | undefined;
+// VRM 0.x models face -Z natively (rotateVRM0 turns the scene 180° around Y),
+// while .vrma canonical space faces +Z — matching the vrma-editor reference
+// and three-vrm's own createVRMAnimationClip, quaternion x/z components are
+// conjugated and hips x/z mirrored when playing on a VRM 0.x model.
+let vrmIsVrm0 = false;
 
 const BONES: VRMHumanBoneName[] = [
   "spine",
@@ -52,21 +57,24 @@ for (const side of ["left", "right"] as const) {
   }
 }
 
-const restCache = new Map<string, THREE.Quaternion>();
-// Parent world rest rotation per bone (scene-level yaw folded in), for the
-// normalized→raw delta conversion in pose-space.ts.
-const parentCache = new Map<string, THREE.Quaternion>();
-// Raw bone nodes resolved once per model instead of a Map lookup per bone per frame.
+// Normalized rig nodes resolved once per model (the rig the engine drives —
+// identical conventions for VRM 0.x and 1.0: identity rest, world-aligned
+// T-pose, facing the model's front).
 const boneCache = new Map<string, THREE.Object3D | null | undefined>();
 
 function boneNode(humanoid: VRM["humanoid"], name: VRMHumanBoneName): THREE.Object3D | null {
   let node = boneCache.get(name);
   if (node === undefined) {
-    node = humanoid?.getRawBoneNode(name) ?? null;
+    node = humanoid?.getNormalizedBoneNode(name) ?? null;
     boneCache.set(name, node);
   }
   return node;
 }
+
+// RAW foot nodes: ground contact is measured on the posed (post-sync) raw
+// skeleton, exactly like the vrma-editor reference measures restFeetY.
+const FOOT_BONES = ["leftFoot", "rightFoot", "leftToes", "rightToes"] as const;
+const rawFootNodes: Array<THREE.Object3D | null> = [];
 let firstFrame = true;
 let motionOverride: MotionState | null = null;
 let motionAbsolute = false;
@@ -78,14 +86,15 @@ export function setMotionOverride(
   absolute = false,
   fade = 1,
   hipsPos?: { x: number; y: number; z: number } | null,
+  hipsRestY?: number,
 ): void {
   motionOverride = state;
   motionAbsolute = absolute;
   motionFade = fade;
   motionHipsPos = hipsPos ?? null;
+  motionHipsRestY = hipsRestY;
 }
 
-const FOOT_BONES = ["leftFoot", "rightFoot", "leftToes", "rightToes"] as const;
 let groundTick = 0;
 
 // horizontal root-motion leash: avatar may drift this far from rest (meters)
@@ -95,8 +104,7 @@ function minFootY(): number {
   // Reads matrixWorld directly; the caller must have run updateMatrixWorld()
   // first. Avoids getWorldPosition(), which re-walks the parent chain per bone.
   let min = Infinity;
-  for (const name of FOOT_BONES) {
-    const bone = boneCache.get(name);
+  for (const bone of rawFootNodes) {
     if (!bone) continue;
     const y = bone.matrixWorld.elements[13];
     if (y < min) min = y;
@@ -104,34 +112,14 @@ function minFootY(): number {
   return min;
 }
 
-// Parent world rest rotation with the scene-level yaw folded in. The yaw
-// (rotateVRM0 turns VRM 0.x models 180° around Y) must be part of P so that
-// authored normalized-frame deltas land in the RENDERED frame: raw =
-// (yaw·P)⁻¹·N·(yaw·P)·B produces a world delta of exactly N on screen. For
-// the π yaw this is equivalent to the x/z negation three-vrm applies to VRM
-// 0.x .vrma tracks — the .vrma bake keeps its own pre-yaw P + negation form.
-function parentWorldRest(vrm: VRM, bone: THREE.Object3D): THREE.Quaternion {
-  const chain: THREE.Object3D[] = [];
-  let cur: THREE.Object3D | null = bone.parent;
-  while (cur && cur !== vrm.scene) {
-    chain.unshift(cur);
-    cur = cur.parent;
-  }
-  const p = new THREE.Quaternion();
-  for (const ancestor of chain) p.multiply(ancestor.quaternion);
-  return p.premultiply(vrm.scene.quaternion);
-}
-
+// Per-model capture at attach: rest hips position of the normalized rig, raw
+// foot nodes for ground measurement, and the model's VRM version. Mirrors the
+// vrma-editor reference's restHipsPos / restFeetY capture.
 function captureRest(vrm: VRM): void {
   const humanoid = vrm.humanoid;
   if (!humanoid) return;
-  for (const name of BONES) {
-    const bone = boneNode(humanoid, name);
-    if (bone && !restCache.has(name)) {
-      restCache.set(name, bone.quaternion.clone());
-      parentCache.set(name, parentWorldRest(vrm, bone));
-    }
-  }
+  vrmIsVrm0 = vrm.meta?.metaVersion === "0";
+  for (const name of BONES) boneNode(humanoid, name);
   const hips = boneNode(humanoid, "hips");
   if (hips && !hipsRestCaptured) {
     restHipsPos.copy(hips.position);
@@ -141,29 +129,33 @@ function captureRest(vrm: VRM): void {
 }
 
 export function resetIdleState(): void {
-  restCache.clear();
-  parentCache.clear();
   boneCache.clear();
+  rawFootNodes.length = 0;
   firstFrame = true;
   hipsRestCaptured = false;
   groundReady = false;
   motionOverride = null;
   motionHipsPos = null;
   motionFade = 1;
+  motionHipsRestY = undefined;
   scheduleNextBlink();
 }
 
 export function captureGroundReference(vrm: VRM): void {
   const humanoid = vrm.humanoid;
   if (!humanoid) return;
-  humanoid.resetRawPose();
-  boneCache.clear();
-  // Pre-populate the bone cache; minFootY() reads from it.
+  vrmIsVrm0 = vrm.meta?.metaVersion === "0";
+  // The rig is fresh at attach: capture rest hips from the normalized rig and
+  // the rest ground height from the raw feet (same capture as the reference).
   for (const name of BONES) boneNode(humanoid, name);
   const hips = boneNode(humanoid, "hips");
   if (hips) {
     restHipsPos.copy(hips.position);
     hipsRestCaptured = true;
+  }
+  rawFootNodes.length = 0;
+  for (const name of FOOT_BONES) {
+    rawFootNodes.push(humanoid.getRawBoneNode(name) ?? null);
   }
   vrm.scene.updateMatrixWorld(true);
   const y = minFootY();
@@ -173,9 +165,21 @@ export function captureGroundReference(vrm: VRM): void {
   }
 }
 
-// Applies a normalized-frame euler delta (YXZ) to a raw bone: converts it
-// into the model's raw-bone space first (pose-space.ts), then composes it
-// onto the raw rest rotation.
+// Authored pose deltas live in CANONICAL space (+Z-facing T-pose, the space
+// .vrma files and every cross-version value use). The normalized rig is
+// captured BEFORE rotateVRM0, so a VRM 0.x model's rig faces its native -Z:
+// canonical deltas must be conjugated by that π yaw — the same x/z negation
+// canonicalToRigQuat applies to .vrma quats and three-vrm's
+// createVRMAnimationClip applies to VRM 0.x tracks. VRM 1.0 rigs already face
+// +Z and pass through unchanged.
+function idleEulerToRigQuat(nx: number, ny: number, nz: number, out: THREE.Quaternion): THREE.Quaternion {
+  out.setFromEuler(_euler.set(nx, ny, nz, "YXZ"));
+  if (vrmIsVrm0) out.set(-out.x, out.y, -out.z, out.w);
+  return out;
+}
+
+// Applies an authored (canonical) euler delta onto the normalized rig node —
+// the rig's rest is identity, so the converted delta IS the local rotation.
 function applyPose(
   humanoid: VRM["humanoid"],
   name: VRMHumanBoneName,
@@ -186,14 +190,10 @@ function applyPose(
   if (!humanoid) return;
   const bone = boneNode(humanoid, name);
   if (!bone) return;
-  const rest = restCache.get(name);
-  const parent = parentCache.get(name);
-  if (!rest || !parent) return;
-  eulerToQuat(nx, ny, nz, _qN);
-  normalizedToRawDelta(_qN, parent, rest, _delta);
-  bone.quaternion.copy(rest).multiply(_delta);
+  idleEulerToRigQuat(nx, ny, nz, bone.quaternion);
 }
 
+// Applies a rig-frame quaternion delta straight onto the rig node.
 function applyDeltaQuat(
   humanoid: VRM["humanoid"],
   name: VRMHumanBoneName,
@@ -202,19 +202,20 @@ function applyDeltaQuat(
   if (!humanoid) return;
   const bone = boneNode(humanoid, name);
   if (!bone) return;
-  const rest = restCache.get(name);
-  if (!rest) return;
-  bone.quaternion.copy(rest).multiply(delta);
+  bone.quaternion.copy(delta);
 }
 
-// YXZ euler -> quat (builtin euler deltas)
-function eulerToQuat(x: number, y: number, z: number, out: THREE.Quaternion): THREE.Quaternion {
-  return out.setFromEuler(_euler.set(x, y, z, "YXZ"));
-}
-
-function deltaToQuat(d: MotionDelta, out: THREE.Quaternion): THREE.Quaternion {
-  if (d.w !== undefined) return out.set(d.x, d.y, d.z, d.w);
-  return eulerToQuat(d.x, d.y, d.z, out);
+// Canonical (.vrma space) quaternion → rig-frame: conjugate x/z for VRM 0.x
+// (the π-yaw conjugation three-vrm's createVRMAnimationClip applies). Euler
+// deltas (legacy authored poses) are canonical too and go through the same
+// conversion.
+function canonicalToRigQuat(d: MotionDelta, out: THREE.Quaternion): THREE.Quaternion {
+  if (d.w !== undefined) {
+    out.set(d.x, d.y, d.z, d.w);
+    if (vrmIsVrm0) out.set(-out.x, out.y, -out.z, out.w);
+    return out;
+  }
+  return idleEulerToRigQuat(d.x, d.y, d.z, out);
 }
 
 function applyMotionOverride(
@@ -228,14 +229,10 @@ function applyMotionOverride(
   const mo = motionOverride?.[name];
   if (mo) {
     if (motionAbsolute) {
-      // Both sides are raw-bone-space quats: the idle delta converted from
-      // the normalized frame, the motion sampled from the v4 bake.
-      const rest = restCache.get(name);
-      const parent = parentCache.get(name);
-      if (!rest || !parent) return;
-      eulerToQuat(nx, ny, nz, _qN);
-      normalizedToRawDelta(_qN, parent, rest, _qIdle);
-      deltaToQuat(mo, _qMo);
+      // Both sides are rig-frame quats: the idle delta conjugated from
+      // canonical space, the motion delta likewise. Slerp by the fade.
+      idleEulerToRigQuat(nx, ny, nz, _qIdle);
+      canonicalToRigQuat(mo, _qMo);
       _qBlend.copy(_qIdle).slerp(_qMo, motionFade);
       applyDeltaQuat(humanoid, name, _qBlend);
     } else {
@@ -288,15 +285,13 @@ function updateBlink(vrm: VRM, dt: number): void {
 
 let breathPhase = 0;
 
-// Idle pose deltas, authored in the NORMALIZED humanoid frame (see
-// pose-space.ts): world-aligned T-pose rest, model facing +Z, viewer's right
-// = +X. Left arm hangs along +X at T-pose, so lowering it rotates about Z
-// toward -Y (z: -1.2); the right arm mirrors. Elbow flexion swings the
-// forearm toward the front (+Z): y: -0.3 left / +0.3 right. Knee flexion
-// swings the shin backward (-Z): +X rotation. Raw-local values would be
-// wrong here — VRM 1.0 bones have identity rest rotations while VRM 0.x
-// exports use Unity's conventions, which is why VRM 1.0 models used to wear
-// this pose arms-up (the +1.2 raise) with twisted forearms.
+// Idle pose deltas, authored in CANONICAL space: +Z-facing T-pose rest,
+// viewer's right = +X — the .vrma convention, shared by both VRM versions.
+// Left arm hangs along +X at T-pose, so lowering it rotates about Z toward
+// -Y (z: -1.2); the right arm mirrors. Elbow flexion swings the forearm
+// toward the front (+Z): y: -0.3 left / +0.3 right. Knee flexion swings the
+// shin backward (-Z): +X rotation. idleEulerToRigQuat conjugates these into
+// the model's rig frame (VRM 0.x rigs face their native -Z).
 const POSE = {
   spine: { x: 0, y: 0, z: 0 },
   chest: { x: 0, y: 0, z: 0 },
@@ -367,13 +362,21 @@ function updateBody(vrm: VRM, dt: number): void {
   applyMotionOverride(vrm.humanoid, applyPose, "leftLowerLeg", POSE.leftLowerLeg.x + Math.sin(breathPhase * 0.6) * 0.015, POSE.leftLowerLeg.y, POSE.leftLowerLeg.z);
   applyMotionOverride(vrm.humanoid, applyPose, "rightLowerLeg", POSE.rightLowerLeg.x + Math.sin(breathPhase * 0.6 + 1) * 0.015, POSE.rightLowerLeg.y, POSE.rightLowerLeg.z);
 
+  // Hips position on the normalized rig: rest by default; with a custom clip
+  // driving translation, blend rest → the clip's position (rescaled to the
+  // model via the rest-height ratio, x/z mirrored for VRM 0.x) by the fade —
+  // the vrma-editor reference's hips handling plus an idle blend.
   const hipsNode = boneNode(vrm.humanoid, "hips");
   if (hipsNode && hipsRestCaptured) {
     hipsNode.position.copy(restHipsPos);
-    if (motionHipsPos) {
-      hipsNode.position.x += motionHipsPos.x * motionFade;
-      hipsNode.position.y += motionHipsPos.y * motionFade;
-      hipsNode.position.z += motionHipsPos.z * motionFade;
+    if (motionHipsPos && motionHipsRestY && motionHipsRestY > 1e-3) {
+      const s = restHipsPos.y / motionHipsRestY;
+      _hipsTarget.set(
+        vrmIsVrm0 ? -motionHipsPos.x * s : motionHipsPos.x * s,
+        motionHipsPos.y * s,
+        vrmIsVrm0 ? -motionHipsPos.z * s : motionHipsPos.z * s,
+      );
+      hipsNode.position.lerp(_hipsTarget, motionFade);
       // leash: clamp horizontal offset to a circle around rest position
       const dx = hipsNode.position.x - restHipsPos.x;
       const dz = hipsNode.position.z - restHipsPos.z;
@@ -386,6 +389,8 @@ function updateBody(vrm: VRM, dt: number): void {
     }
   }
 }
+
+const _hipsTarget = new THREE.Vector3();
 
 export function idleAnimation(handle: VRMHandle, _t: number, dt: number, expr?: ExpressionController | null): void {
   const vrm = handle.vrm;
@@ -404,11 +409,25 @@ export function idleAnimation(handle: VRMHandle, _t: number, dt: number, expr?: 
     for (const name in motionOverride) {
       if (IDLE_APPLIED.has(name)) continue;
       const mo = motionOverride[name];
-      deltaToQuat(mo, _qMo);
+      canonicalToRigQuat(mo, _qMo);
       _qBlend.identity().slerp(_qMo, k);
       applyDeltaQuat(vrm.humanoid, name as VRMHumanBoneName, _qBlend);
     }
   }
+
+  // Propagate the normalized rig onto the raw bones (autoUpdateHumanBones) —
+  // the same sync the vrma-editor reference runs after posing the rig. The
+  // engine loop's vrm.update(dt) call then advances expressions/lookAt/
+  // springbones on top of the posed skeleton.
+  vrm.humanoid?.update();
+}
+
+/** Post-sync pass: runs after vrm.update(dt) has propagated the normalized
+ *  rig onto the raw bones and updated world matrices. Ground contact is
+ *  measured on the raw skeleton here — the reference's applyHipsLift slot. */
+export function postIdleAnimation(handle: VRMHandle): void {
+  const vrm = handle.vrm;
+  if (!vrm) return;
 
   vrm.scene.updateMatrixWorld();
   if (!motionOverride) {
@@ -426,7 +445,7 @@ export function idleAnimation(handle: VRMHandle, _t: number, dt: number, expr?: 
 
   // cheap root clamp: push the avatar up when a foot sinks below rest
   // ground height. One-sided only (never pulls down) so it can't cancel
-  // jumps or the baked hips Y bob. Runs for absolute (VRMA) motions.
+  // jumps or the clip's hips Y motion. Runs for absolute (custom) motions.
   if (motionAbsolute && motionFade > 0.001 && groundReady) {
     const y = minFootY();
     if (y !== Infinity) {
@@ -434,7 +453,8 @@ export function idleAnimation(handle: VRMHandle, _t: number, dt: number, expr?: 
       if (lift < 1e-5) lift = 0;
       else if (lift > 0.5) lift = 0.5;
       if (lift > 0) {
-        const hipsNode = boneNode(vrm.humanoid, "hips");
+        const humanoid = vrm.humanoid;
+        const hipsNode = humanoid?.getRawBoneNode("hips") ?? null;
         if (hipsNode) {
           hipsNode.position.y += lift;
           // Position write marks the subtree dirty; a normal update propagates it.

@@ -11,7 +11,7 @@
 import { useEffect, useRef, useState } from "react";
 import { definePlugin, type PluginContext } from "@companion-lab/plugin";
 import {
-  MOTION_BAKE_VERSION,
+  MOTION_SOURCE_VERSION,
   makeLibraryApi,
   type LibraryApi,
   type MotionMeta,
@@ -58,8 +58,8 @@ type LibrarySets = {
 
 /**
  * Fetch the stored library and apply the host App.tsx reloadCustomLibrary
- * logic: drop (delete) motion bakes whose version doesn't match the current
- * bake format, backfill missing descriptions, and map emotion reset_ms to
+ * logic: drop (delete) motion bakes from formats that no longer have a
+ * playback path (pre-v6), backfill missing descriptions, and map emotion reset_ms to
  * the resetMs field the avatar surface expects.
  */
 async function fetchFreshLibrary(
@@ -77,9 +77,12 @@ async function fetchFreshLibrary(
     );
     const motions: LibrarySets["motions"] = [];
     for (const m of stored as MotionMeta[]) {
-      if (m.version !== MOTION_BAKE_VERSION) {
+      // fmt-6 clips store their original .vrma source and play on any model.
+      // Anything older (v3 keyframes, v4/v5 per-model bakes) has no playback
+      // path left — delete rather than misplay; re-import the .vrma.
+      if (m.version !== MOTION_SOURCE_VERSION) {
         ctx.log.warn(
-          `Skipping stale motion bake "${m.name}" (v${m.version ?? "?"}, current v${MOTION_BAKE_VERSION}); re-import the .vrma`,
+          `Skipping stale motion bake "${m.name}" (v${m.version ?? "?"}, current v${MOTION_SOURCE_VERSION}); re-import the .vrma`,
         );
         try {
           await api.deleteMotion(m.name);

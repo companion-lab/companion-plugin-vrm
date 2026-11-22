@@ -201,6 +201,43 @@ function checkModel(path) {
   // Shins stay mostly downward with a slight backward (knee) bend.
   assert("left shin points down", shinL && shinL.y < -0.9);
   assert("knee bends backward (heel back)", shinL && shinL.z < 0.05);
+
+  // v5 .vrma playback equivalence: applying an authored normalized quat N
+  // through the yaw-folded sandwich must land exactly on three-vrm's own
+  // mapping — pre-yaw P with the x/z negation of N for VRM 0.x (the π-yaw
+  // conjugation in createVRMAnimationHumanoidTracks), plain N for VRM 1.0.
+  const lu = bones["leftUpperArm"]?.node;
+  const r = rest["leftUpperArm"];
+  if (lu != null && r) {
+    const n = eulerQuat(0.2, -0.4, 1.1);
+    const d = toRawDelta(n, r.p, r.b); // engine playback: P has yaw folded in
+    const mine = r.b.clone().multiply(d);
+    // three-vrm: pre-yaw parent chain + negated track values for VRM 0.x
+    const pPre = r.p.clone().premultiply(sceneYaw.clone().invert());
+    const negated = n.clone();
+    if (isVrm0) {
+      negated.x = -negated.x;
+      negated.z = -negated.z;
+    }
+    const ref = pPre.clone().invert().multiply(negated).multiply(pPre).multiply(r.b);
+    const probe = new THREE.Vector3(0.3, -0.8, 0.52);
+    const okEq =
+      mine.angleTo(ref) < 1e-6 &&
+      probe.clone().applyQuaternion(mine).distanceTo(probe.clone().applyQuaternion(ref)) < 1e-6;
+    assert("v5 playback ≡ three-vrm mapping", okEq);
+
+    // v5 root motion: chain⁻¹·yaw⁻¹·offset must equal inv(yaw·chain)·offset.
+    const offset = new THREE.Vector3(0.1, -0.05, 0.3);
+    const mineV = offset
+      .clone()
+      .applyQuaternion(sceneYaw.clone().invert())
+      .applyQuaternion(pPre.clone().invert());
+    const parentWorld = new THREE.Matrix4().makeRotationFromQuaternion(
+      sceneYaw.clone().multiply(pPre),
+    );
+    const refV = offset.clone().applyMatrix4(parentWorld.invert());
+    assert("v5 hips offset ≡ inv(yaw·chain)·offset", mineV.distanceTo(refV) < 1e-6);
+  }
   return ok;
 }
 
