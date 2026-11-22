@@ -39,6 +39,7 @@ import { tauriListen } from "../vendor/tauri-events";
 // Shared backend-call retry: plugin-context invokes occasionally never
 // resolve on macOS (see retry.ts) — the boot sequence must converge.
 import { callWithRetry } from "../retry";
+import { registerAvatarReplyShaping } from "../reply-shaping";
 
 type FpsCap = "thirty" | "sixty" | "uncapped";
 
@@ -236,6 +237,9 @@ function runEngine(ctx: PluginContext, canvas: HTMLCanvasElement): () => void {
       for (const e of emotions) {
         registerCustomEmotion(e as never);
       }
+      // The reply schema enumerates motion/emotion names — refresh it so new
+      // (or deleted) custom clips leave the prompt lists live.
+      registerAvatarReplyShaping(ctx);
     },
     describeCapabilities: () => ({
       emotions: listEmotionNames(),
@@ -246,6 +250,12 @@ function runEngine(ctx: PluginContext, canvas: HTMLCanvasElement): () => void {
       return scene ? canvasPixelAlpha(scene, x, y) : null;
     },
   });
+
+  // Register the reply shape only after the handlers install: the bus queues
+  // library registrations (activation's pushLibrary) until this point, so
+  // this is the first moment the registries hold the complete sets the
+  // schema enums are built from. Refreshed again on every reloadLibrary.
+  registerAvatarReplyShaping(ctx);
 
   void (async () => {
     // The boot retries as a whole (individual steps retry via callWithRetry):
