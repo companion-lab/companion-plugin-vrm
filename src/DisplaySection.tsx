@@ -59,24 +59,42 @@ export function DisplaySection({ ctx }: { ctx: PluginContext }) {
         max={160}
         step={2}
         value={display.x}
-        onChange={(e: ChangeEvent<HTMLInputElement>) => update({ x: parseFloat(e.target.value) })}
+        onChange={(e: ChangeEvent<HTMLInputElement>) =>
+          update({ x: parseFloat(e.target.value) })
+        }
       />
       <RangeSlider
         label="Vertical offset"
         valueLabel={`${Math.round(display.y)} px`}
-        min={-220}
-        max={160}
+        min={-1000}
+        max={1000}
         step={2}
         value={display.y}
-        onChange={(e: ChangeEvent<HTMLInputElement>) => update({ y: parseFloat(e.target.value) })}
+        onChange={(e: ChangeEvent<HTMLInputElement>) =>
+          update({ y: parseFloat(e.target.value) })
+        }
       />
-      <FormField label="Cursor tracking" hint="The character's head and eyes follow your cursor.">
-        <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+      <FormField
+        label="Cursor tracking"
+        hint="The character's head and eyes follow your cursor."
+      >
+        <label
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            cursor: "pointer",
+          }}
+        >
           <input
             type="checkbox"
             checked={display.tracking}
             onChange={(e) => update({ tracking: e.target.checked })}
-            style={{ width: 16, height: 16, accentColor: "var(--accent, #7c6cf6)" }}
+            style={{
+              width: 16,
+              height: 16,
+              accentColor: "var(--accent, #7c6cf6)",
+            }}
           />
           Follow the cursor
         </label>
