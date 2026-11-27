@@ -1,7 +1,7 @@
 {
   "id": "vrm",
   "name": "VRM Avatar",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "VRM avatar models (with the built-in demo asset), motion and emotion clips, and graphics settings. Also owns the avatar reply shaping the chat loop consumes (emotion/motion fields and their application).",
   "abi": 3,
   "permissions": [
