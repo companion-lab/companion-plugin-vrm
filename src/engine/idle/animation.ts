@@ -4,6 +4,7 @@ import { VRMHandle } from "../loader";
 import type { MotionDelta, MotionState } from "./motion";
 import type { ExpressionController } from "../expression/controller";
 import { updateCursorLook } from "../cursor-look";
+import { updateCarryLean, type CarryLean } from "../carry-lean";
 import type { VRMAnimation } from "@pixiv/three-vrm-animation";
 import { sampleVrmaPose } from "./motion";
 
@@ -327,6 +328,7 @@ let idleTime = 0;
 const IDENTITY_DELTA: MotionDelta = { x: 0, y: 0, z: 0, w: 1 };
 const _qB = new THREE.Quaternion();
 const _qLook = new THREE.Quaternion();
+const _qCarry = new THREE.Quaternion();
 const _hipsMotion = new THREE.Vector3();
 
 /** Install the bundled idle clip (null restores the manual pose fallback). */
@@ -338,8 +340,13 @@ export function setIdleClip(anim: VRMAnimation | null): void {
 function updateBody(vrm: VRM, dt: number): void {
   if (firstFrame) captureRest(vrm);
 
+  // Carry reaction (see carry-lean.ts): smooths the host's drag feed, shifts
+  // the model root opposite the motion (spring bones follow), and returns the
+  // body lean. Zero when the window is at rest, so this costs nothing idle.
+  const carry = updateCarryLean(dt);
+
   if (idleClip) {
-    updateIdleClipBody(vrm, dt);
+    updateIdleClipBody(vrm, dt, carry);
     return;
   }
 
@@ -357,9 +364,12 @@ function updateBody(vrm: VRM, dt: number): void {
   const weightShift = Math.sin(breathPhase * 0.5);
   const breathY = Math.sin(breathPhase * 1.2) * 0.01;
 
-  applyMotionOverride(vrm.humanoid, applyPose, "spine", POSE.spine.x, POSE.spine.y + breathY, POSE.spine.z + sway);
-  applyMotionOverride(vrm.humanoid, applyPose, "chest", POSE.chest.x, POSE.chest.y, POSE.chest.z + sway * 0.6);
-  applyMotionOverride(vrm.humanoid, applyPose, "upperChest", POSE.upperChest.x, POSE.upperChest.y, POSE.upperChest.z + breath * 0.5);
+  // Carry lean rides on the idle pose (targets smoothed in carry-lean): the
+  // roll tips the body opposite the drag (inertia lag), distributed down the
+  // spine chain; the pitch is the smaller forward/back component.
+  applyMotionOverride(vrm.humanoid, applyPose, "spine", POSE.spine.x + carry.pitch * 0.3, POSE.spine.y + breathY, POSE.spine.z + sway + carry.roll * 0.4);
+  applyMotionOverride(vrm.humanoid, applyPose, "chest", POSE.chest.x + carry.pitch * 0.3, POSE.chest.y, POSE.chest.z + sway * 0.6 + carry.roll * 0.35);
+  applyMotionOverride(vrm.humanoid, applyPose, "upperChest", POSE.upperChest.x, POSE.upperChest.y, POSE.upperChest.z + breath * 0.5 + carry.roll * 0.25);
   applyMotionOverride(vrm.humanoid, applyPose, "neck", POSE.neck.x + lookPitch * 0.3, POSE.neck.y + lookYaw * 0.3, POSE.neck.z + Math.sin(breathPhase * 0.5) * 0.02);
   applyMotionOverride(vrm.humanoid, applyPose, "head", POSE.head.x + lookPitch, POSE.head.y + lookYaw, POSE.head.z + Math.sin(breathPhase * 0.4) * 0.02);
 
@@ -369,7 +379,7 @@ function updateBody(vrm: VRM, dt: number): void {
   applyMotionOverride(vrm.humanoid, applyPose, "leftShoulder", POSE.leftShoulder.x, POSE.leftShoulder.y, POSE.leftShoulder.z + armBob * 0.3);
   applyMotionOverride(vrm.humanoid, applyPose, "rightShoulder", POSE.rightShoulder.x, POSE.rightShoulder.y, POSE.rightShoulder.z - armBob * 0.3);
 
-  applyMotionOverride(vrm.humanoid, applyPose, "hips", POSE.hips.x + breath * 0.3, POSE.hips.y, POSE.hips.z + weightShift * 0);
+  applyMotionOverride(vrm.humanoid, applyPose, "hips", POSE.hips.x + breath * 0.3 + carry.pitch * 0.4, POSE.hips.y, POSE.hips.z + weightShift * 0 + carry.roll * 0.2);
 
   applyMotionOverride(vrm.humanoid, applyPose, "leftUpperArm", POSE.leftUpperArm.x, POSE.leftUpperArm.y, POSE.leftUpperArm.z + armBob);
   applyMotionOverride(vrm.humanoid, applyPose, "rightUpperArm", POSE.rightUpperArm.x, POSE.rightUpperArm.y, POSE.rightUpperArm.z - armBob);
@@ -419,8 +429,9 @@ const _hipsTarget = new THREE.Vector3();
 // The idle-clip body: samples the bundled idle clip on a loop and writes the
 // normalized rig directly — the vrma-editor reference's applyPose pattern.
 // The idle clip owns the base pose; motions blend over it (absolute slerp /
-// additive multiply) and the cursor look pre-multiplies onto neck/head/eyes.
-function updateIdleClipBody(vrm: VRM, dt: number): void {
+// additive multiply), the cursor look pre-multiplies onto neck/head/eyes, and
+// the carry lean pre-multiplies onto the spine chain.
+function updateIdleClipBody(vrm: VRM, dt: number, carry: CarryLean): void {
   const humanoid = vrm.humanoid;
   if (!humanoid || !idleClip) return;
   idleTime = (idleTime + dt) % Math.max(idleClip.duration, 0.05);
@@ -454,6 +465,19 @@ function updateIdleClipBody(vrm: VRM, dt: number): void {
     if ((pitchW || yawW) && !(motionAbsolute && motionOverride?.[name])) {
       idleEulerToRigQuat(lookPitch * pitchW, lookYaw * yawW, 0, _qLook);
       node.quaternion.copy(_qB.premultiply(_qLook));
+      continue;
+    }
+    // Carry lean rides the spine chain the same way (weights sum to ~1.2 of
+    // the clamped lean, like the manual fallback).
+    let rollW = 0;
+    let carryPitchW = 0;
+    if (name === "hips") { rollW = 0.2; carryPitchW = 0.4; }
+    else if (name === "spine") { rollW = 0.4; carryPitchW = 0.3; }
+    else if (name === "chest") { rollW = 0.35; carryPitchW = 0.3; }
+    else if (name === "upperChest") { rollW = 0.25; carryPitchW = 0.2; }
+    if ((rollW || carryPitchW) && !(motionAbsolute && motionOverride?.[name])) {
+      idleEulerToRigQuat(carry.pitch * carryPitchW, 0, carry.roll * rollW, _qCarry);
+      node.quaternion.copy(_qB.premultiply(_qCarry));
       continue;
     }
     node.quaternion.copy(_qB);

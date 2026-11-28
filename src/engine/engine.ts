@@ -38,6 +38,7 @@ import { IdleMixer, loadIdleMixer } from "./idle/idle-mixer";
 import { MOTION_SOURCE_VERSION } from "./idle/registry";
 import { coerceDisplay, DEFAULT_DISPLAY, type DisplaySettings } from "./display";
 import { pollCursorLook, setCursorLookEnabled } from "./cursor-look";
+import { captureCarryRoot, releaseCarryRoot, setCarryLean } from "./carry-lean";
 import { tauriListen } from "../vendor/tauri-events";
 // Shared backend-call retry: plugin-context invokes occasionally never
 // resolve on macOS (see retry.ts) — the boot sequence must converge.
@@ -140,6 +141,9 @@ function runEngine(ctx: PluginContext, canvas: HTMLCanvasElement): () => void {
     resetIdleState();
     handleRef.current = vrm;
     vrm.scene.position.y = 0.6;
+    // Carry reaction (carry-lean.ts): lags this root opposite window drags
+    // around the just-placed rest position.
+    captureCarryRoot(vrm.scene);
     scene.stage.add(vrm.scene);
     // The engine drives the NORMALIZED rig (autoUpdateHumanBones stays on, the
     // three-vrm default): every frame the idle pose + motion sampler write the
@@ -258,6 +262,7 @@ function runEngine(ctx: PluginContext, canvas: HTMLCanvasElement): () => void {
       const scene = sceneRef.current;
       return scene ? canvasPixelAlpha(scene, x, y) : null;
     },
+    setCarry: (lean) => setCarryLean(lean),
   });
 
   // Register the reply shape only after the handlers install: the bus queues
@@ -443,6 +448,8 @@ function runEngine(ctx: PluginContext, canvas: HTMLCanvasElement): () => void {
   return () => {
     cancelled = true;
     ctx.avatar.provide({}); // back to no-ops; live handlers died with the scene
+    setCarryLean(null); // settle the carry pose; the root dies with the scene
+    releaseCarryRoot();
     for (const off of cleanups) off();
     cleanups = [];
     swapGen++;
